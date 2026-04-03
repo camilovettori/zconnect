@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { AppShell, useAppSession } from "../../components/app-shell";
+import { AppShell } from "../../components/app-shell";
+import { useAppSession } from "../../components/app-session";
 
 type UserRow = {
   id: string;
