@@ -61,8 +61,8 @@ export default function LoginPage() {
               <Image
                 src="/log.png"
                 alt="Ziffera logo"
-                width={128}
-                height={128}
+                width={100}
+                height={100}
                 priority
                 className="object-contain"
               />
