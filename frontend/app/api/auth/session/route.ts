@@ -24,7 +24,12 @@ export async function GET() {
     return NextResponse.json({ user: null }, { status: 401 });
   }
 
-  const currentUser = await fetchCurrentUser(accessToken);
+  let currentUser = null;
+  try {
+    currentUser = await fetchCurrentUser(accessToken);
+  } catch {
+    currentUser = null;
+  }
   if (currentUser) {
     return NextResponse.json({ user: currentUser });
   }
@@ -35,7 +40,7 @@ export async function GET() {
 
   try {
     const refreshed = await refreshSession(refreshToken);
-    const nextUser = await fetchCurrentUser(refreshed.access_token);
+    const nextUser = await fetchCurrentUser(refreshed.access_token).catch(() => null);
     if (!nextUser) {
       return NextResponse.json({ user: null }, { status: 401 });
     }

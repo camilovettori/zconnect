@@ -57,14 +57,15 @@ export default function LoginPage() {
       <div className="w-full max-w-md rounded-[2rem] border border-slate-200/80 bg-white/85 p-8 shadow-[0_24px_70px_-35px_rgba(15,23,42,0.35)] backdrop-blur-xl">
         <div className="flex flex-col items-center text-center">
           <div className="mb-6 flex justify-center">
-            <div className="rounded-3xl bg-white p-4 shadow-[0_10px_30px_rgba(15,23,42,0.12)]">
+            <div className="rounded-[2rem] border border-white/40 bg-white/65 p-4 shadow-[0_18px_50px_rgba(59,130,246,0.18),0_10px_30px_rgba(15,23,42,0.10)] backdrop-blur-xl">
               <Image
                 src="/log.png"
-                alt="Ziffera logo"
-                width={70}
-                height={70}
+                alt="Zconnect logo"
+                width={120}
+                height={120}
                 priority
-                className="object-contain"
+                className="h-auto w-[120px] object-contain"
+                unoptimized
               />
             </div>
           </div>

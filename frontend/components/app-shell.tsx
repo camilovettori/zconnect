@@ -14,7 +14,7 @@ const NAV_ITEMS = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user } = useAppSession();
+  const { user, loading } = useAppSession();
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -54,8 +54,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
             <div className="flex items-center gap-3">
               <div className="hidden text-right sm:block">
-                <div className="text-sm font-medium text-slate-700">{user?.email ?? "Loading session..."}</div>
-                <div className="text-xs text-slate-500">{user?.role ? user.role.toUpperCase() : "..."}</div>
+                <div className="text-sm font-medium text-slate-700">
+                  {loading ? "Loading session..." : user?.email || "Signed in"}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {loading ? "..." : user?.role ? user.role.toUpperCase() : "SIGNED IN"}
+                </div>
               </div>
               <button
                 onClick={handleLogout}

@@ -18,12 +18,24 @@ type SessionState = {
 const SessionContext = createContext<SessionState | null>(null);
 
 async function loadSession() {
-  const response = await fetch("/api/auth/session", { cache: "no-store" });
-  if (!response.ok) {
+  try {
+    const response = await fetch("/api/auth/session", { cache: "no-store" });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      return null;
+    }
+    const user = payload?.user;
+    if (!user || typeof user !== "object") {
+      return null;
+    }
+    return {
+      id: String((user as { id?: unknown }).id || ""),
+      email: String((user as { email?: unknown }).email || ""),
+      role: String((user as { role?: unknown }).role || "user"),
+    } satisfies SessionUser;
+  } catch {
     return null;
   }
-  const payload = await response.json().catch(() => null);
-  return payload?.user ?? null;
 }
 
 export function useAppSession() {
@@ -62,4 +74,3 @@ export function AppSessionProvider({ children }: { children: ReactNode }) {
 
   return <SessionContext.Provider value={{ user, loading, refresh }}>{children}</SessionContext.Provider>;
 }
-

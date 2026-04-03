@@ -20,11 +20,12 @@ export function BrandLogo({
     >
       <Image
         src="/log.png"
-        alt="Ziffera logo"
+        alt="Zconnect logo"
         width={width}
         height={height}
         className="h-auto w-auto object-contain"
         priority
+        unoptimized
       />
     </div>
   );
