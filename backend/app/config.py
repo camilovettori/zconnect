@@ -1,6 +1,6 @@
 from pathlib import Path
-from urllib.parse import urlparse
 
+from sqlalchemy.engine import make_url
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -44,23 +44,35 @@ def normalize_database_url(raw_url: str) -> str:
 
 
 def get_database_url_log_details(normalized_url: str) -> dict[str, str | int | None]:
-    parsed = urlparse(normalized_url)
-    if normalized_url.startswith("sqlite"):
-        database = parsed.path or ""
-        return {
-            "scheme": "sqlite",
-            "host": None,
-            "port": None,
-            "database": database.lstrip("/"),
-        }
-
-    database = parsed.path.lstrip("/") if parsed.path else None
-    return {
-        "scheme": parsed.scheme or None,
-        "host": parsed.hostname,
-        "port": parsed.port,
-        "database": database,
+    fallback = {
+        "scheme": "unknown",
+        "host": "unparseable",
+        "port": None,
+        "database": None,
     }
+
+    try:
+        parsed = make_url(normalized_url)
+        backend_name = getattr(parsed, "drivername", "") or ""
+
+        if backend_name.startswith("sqlite"):
+            database = getattr(parsed, "database", None) or ""
+            return {
+                "scheme": "sqlite",
+                "host": None,
+                "port": None,
+                "database": database,
+            }
+
+        database = getattr(parsed, "database", None)
+        return {
+            "scheme": backend_name or "unknown",
+            "host": getattr(parsed, "host", None) or "unparseable",
+            "port": getattr(parsed, "port", None),
+            "database": database,
+        }
+    except Exception:
+        return fallback
 
 
 class Settings(BaseSettings):

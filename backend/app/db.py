@@ -9,7 +9,15 @@ from .config import get_database_url_log_details, settings
 logger = logging.getLogger(__name__)
 
 normalized_database_url = settings.normalized_database_url
-database_url_details = get_database_url_log_details(normalized_database_url)
+try:
+    database_url_details = get_database_url_log_details(normalized_database_url)
+except Exception:
+    database_url_details = {
+        "scheme": "unknown",
+        "host": "unparseable",
+        "port": None,
+        "database": None,
+    }
 
 logger.info(
     "Using DATABASE_URL: scheme=%s host=%s port=%s database=%s",
