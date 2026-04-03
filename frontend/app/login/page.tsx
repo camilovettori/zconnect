@@ -1,15 +1,8 @@
 "use client";
 
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-
-function BrandMark() {
-  return (
-    <div className="flex h-14 w-14 items-center justify-center rounded-3xl bg-slate-950 text-white shadow-[0_20px_40px_-18px_rgba(15,23,42,0.8)]">
-      <span className="text-2xl font-semibold tracking-tight">Z</span>
-    </div>
-  );
-}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -63,9 +56,18 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center px-4 py-10">
       <div className="w-full max-w-md rounded-[2rem] border border-slate-200/80 bg-white/85 p-8 shadow-[0_24px_70px_-35px_rgba(15,23,42,0.35)] backdrop-blur-xl">
         <div className="flex flex-col items-center text-center">
-          <BrandMark />
+          <div className="relative h-16 w-16 overflow-hidden rounded-3xl bg-white shadow-[0_20px_40px_-18px_rgba(15,23,42,0.16)]">
+            <Image
+              src="/log.png"
+              alt="Ziffera logo"
+              fill
+              sizes="64px"
+              className="object-contain p-1.5"
+              priority
+            />
+          </div>
           <h1 className="mt-5 text-3xl font-semibold tracking-tight text-slate-950">Zconnect</h1>
-          <p className="mt-2 text-sm text-slate-600">Invoice automation for Unify → Zoho</p>
+          <p className="mt-2 text-sm text-slate-600">Invoice automation for Unify {"->"} Zoho</p>
         </div>
 
         <form onSubmit={submit} className="mt-8 space-y-4">
@@ -117,14 +119,7 @@ export default function LoginPage() {
             {loading ? "Signing in..." : "Login"}
           </button>
         </form>
-
-        <div className="mt-8 text-center text-sm text-slate-500">
-          <div>Developed by Ziffera</div>
-          <div>www.ziffera.ie</div>
-          <div>Simple digital solutions for local businesses</div>
-        </div>
       </div>
     </main>
   );
 }
-

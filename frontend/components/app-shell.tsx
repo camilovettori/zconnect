@@ -2,34 +2,19 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo } from "react";
 import { useAppSession } from "./app-session";
+import { BrandLogo } from "./brand-logo";
 
 const NAV_ITEMS = [
   { href: "/sync", label: "Sync" },
   { href: "/history", label: "History" },
-  { href: "/connections", label: "Connections" },
-  { href: "/users", label: "Users", adminOnly: true },
   { href: "/settings", label: "Settings" },
 ];
-
-function BrandMark() {
-  return (
-    <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-950 text-white shadow-[0_18px_40px_-20px_rgba(15,23,42,0.9)]">
-      <span className="text-xl font-semibold tracking-tight">Z</span>
-    </div>
-  );
-}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user } = useAppSession();
-
-  const visibleNav = useMemo(
-    () => NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === "admin"),
-    [user?.role],
-  );
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -37,20 +22,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.09),transparent_28%),radial-gradient(circle_at_bottom_right,rgba(15,23,42,0.08),transparent_25%),linear-gradient(180deg,#f8fafc_0%,#ffffff_42%,#f8fafc_100%)] text-slate-900">
+    <div className="flex min-h-screen flex-col bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.09),transparent_28%),radial-gradient(circle_at_bottom_right,rgba(15,23,42,0.08),transparent_25%),linear-gradient(180deg,#f8fafc_0%,#ffffff_42%,#f8fafc_100%)] text-slate-900">
       <header className="sticky top-0 z-40 border-b border-white/70 bg-white/72 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <Link href="/sync" className="flex items-center gap-3">
-              <BrandMark />
+              <BrandLogo size={44} />
               <div>
                 <div className="text-lg font-semibold tracking-tight text-slate-950">Zconnect</div>
-                <div className="text-xs text-slate-500">Invoice automation for Unify → Zoho</div>
+                <div className="text-xs text-slate-500">Invoice automation for Unify {"->"} Zoho</div>
               </div>
             </Link>
 
             <div className="flex flex-wrap items-center gap-2">
-              {visibleNav.map((item) => {
+              {NAV_ITEMS.map((item) => {
                 const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
                 return (
                   <Link
@@ -80,12 +65,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           </div>
-          <div className="text-[11px] text-slate-400">Developed by Ziffera • www.ziffera.ie • Simple digital solutions for local businesses</div>
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">{children}</div>
+      <div className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 lg:px-8">{children}</div>
+
+      <footer className="border-t border-white/70 bg-white/55 px-4 py-8 backdrop-blur-xl sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-7xl flex-col items-center gap-1 text-center text-[11px] leading-5 text-slate-400">
+          <div>Developed by Ziffera</div>
+          <div>www.ziffera.ie</div>
+          <div>Simple digital solutions for local businesses</div>
+        </div>
+      </footer>
     </div>
   );
 }
-
