@@ -1,27 +1,29 @@
 import Image from "next/image";
 
 export function BrandLogo({
-  size = 40,
+  width = 40,
+  height = 40,
   className = "",
 }: {
-  size?: number;
+  width?: number;
+  height?: number;
   className?: string;
 }) {
   return (
     <div
       className={[
-        "relative overflow-hidden rounded-2xl bg-white",
+        "flex items-center justify-center overflow-hidden rounded-2xl bg-white",
         "shadow-[0_18px_40px_-24px_rgba(15,23,42,0.45)]",
         className,
       ].join(" ")}
-      style={{ width: size, height: size }}
+      style={{ width, height }}
     >
       <Image
         src="/log.png"
         alt="Ziffera logo"
-        fill
-        sizes={`${size}px`}
-        className="object-contain p-1.5"
+        width={width}
+        height={height}
+        className="h-auto w-auto object-contain"
         priority
       />
     </div>

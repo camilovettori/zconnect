@@ -27,7 +27,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
             <Link href="/sync" className="flex items-center gap-3">
-              <BrandLogo size={44} />
+              <BrandLogo width={44} height={44} />
               <div>
                 <div className="text-lg font-semibold tracking-tight text-slate-950">Zconnect</div>
                 <div className="text-xs text-slate-500">Invoice automation for Unify {"->"} Zoho</div>

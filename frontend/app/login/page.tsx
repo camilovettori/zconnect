@@ -56,16 +56,14 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center px-4 py-10">
       <div className="w-full max-w-md rounded-[2rem] border border-slate-200/80 bg-white/85 p-8 shadow-[0_24px_70px_-35px_rgba(15,23,42,0.35)] backdrop-blur-xl">
         <div className="flex flex-col items-center text-center">
-          <div className="relative h-16 w-16 overflow-hidden rounded-3xl bg-white shadow-[0_20px_40px_-18px_rgba(15,23,42,0.16)]">
-            <Image
-              src="/log.png"
-              alt="Ziffera logo"
-              fill
-              sizes="64px"
-              className="object-contain p-1.5"
-              priority
-            />
-          </div>
+          <Image
+            src="/log.png"
+            alt="Ziffera logo"
+            width={76}
+            height={76}
+            className="rounded-3xl bg-white p-2 shadow-[0_20px_40px_-18px_rgba(15,23,42,0.16)]"
+            priority
+          />
           <h1 className="mt-5 text-3xl font-semibold tracking-tight text-slate-950">Zconnect</h1>
           <p className="mt-2 text-sm text-slate-600">Invoice automation for Unify {"->"} Zoho</p>
         </div>
