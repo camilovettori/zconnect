@@ -1,0 +1,2670 @@
+---
+openapi: 3.0.3
+info:
+  version: 1.0.0
+  title: UnifyOrdering Public API
+  description: |
+    This document describes public API for integration with UnifyOrdering Ltd.
+
+    ## Overview
+
+    This API covers the following parts of the interaction with UnifyOrdering:
+
+    * **Orders API** information about orders, confirm and cancel orders.
+    * **Products API** managing with the product catalog: creating a new product, updating product attributes,
+      showing/hiding the product.
+    * **Settings API** managing price settings, visibility, delivery days setup.
+    * **Buyers API** manage buyers specific settings (prices, visibility, delivery days).
+
+    ## Authentication
+
+    Before any API request can be made, authentication must be performed.
+
+    For authorization, the [OAuth 2.0](https://oauth.net/2/) protocol and
+    ["Client Credentials Flow"](https://www.oauth.com/oauth2-servers/access-tokens/client-credentials/) are used.
+    As a result of authorization, Public API issues a token. It must be used in subsequent calls to API methods.
+    The issued token has a lifetime, after which you need to get a new token. When accessing the API with an expired
+    token, the API will respond with an appropriate error.
+
+    To receive a token, send a POST request with client credentials (CLIENTID and CLIENTSECRET) and indication
+    of the flow type to https://oauth.unifyordering.com/oauth2/token.
+
+    If you do not have client credentials yet, request them from the our support team.
+
+    Client credentials can be passed both through the standard HTTP authentication mechanism and through HTTP request
+    parameters.
+
+    An example request with HTTP client authentication using curl:
+
+    ```bash
+    curl -X POST -u CLIENTID:CLIENTSECRET 'https://oauth.unifyordering.com/oauth2/token' -d 'grant_type=client_credentials'
+    ```
+
+    An example of a request passing details through parameters using curl:
+
+    ```bash
+    curl -X POST 'https://oauth.unifyordering.com/oauth2/token' -d 'grant_type=client_credentials&client_id=CLIENTID&client_secret=CLIENTSECRET'
+    ```
+
+    The result of this request is JSON with a body:
+    ```json
+    {
+      "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOltdLCJleHAiOjE2NjIxMDU5MDMsImlhdCI6MTY2MjEwMjMwMywiaXNzIjoiaHR0cHM6Ly9vYXV0aC1kZXYudW5pZnlvcmRlcmluZy5jb20vb2F1dGgyIiwianRpIjoiNzQzMTRlMDItNzk0NS00ODEzLWFjZjctM2MwYjFjYWY4YjMxIiwib3JnYW5pc2F0aW9uX2lkIjoiMSIsInNjcCI6W10sInVzZXJfdG9rZW4iOiJhYjcyOWMyNTA0NDQ3YmNmMmFlNjk2NzE2NWQ4MzVkZCJ9.JZdBfynxlW-BXFK1U61KAWzlJ5ysBYRnQ74P1JpGHUIofAO6ltffo85lJosdwlkN0MBROr4yyT5TWlImRRgf7_61iUOWShf_NfJapF3a94De4ysv2FVfOvLujTdb0aFq-Ri4uVCZjdPo8p9hFlsHk5ytZmBx-GB9vNqwkUWHmDxSemSGKVGBC9s9enxBHRq25XT--XgtTr5QjU0HAcQM9QcfasR5Jv_pPPCJM235OKp86rnuiZxG8-cXfqThw2LIKhKOFKI2eYFfQcQThRYY_6FjHeWb7vh8x0AoPxdraXg9SHK6BtmLRYK4vwA6Ox7vHF6YjWTQEv5un_5r43BwSA",
+      "expires_in": 3599,
+      "scope": "pubapi",
+      "token_type": "bearer"
+    }
+    ```
+servers:
+  - url: /v1
+security:
+  - ApiKeyJWT: [ ]
+paths:
+  /businessProfile:
+    get:
+      summary: Retrieve business profile
+      operationId: GetBusinessProfile
+      tags:
+        - Settings
+      responses:
+        '200':
+          $ref: '#/components/responses/GetBusinessProfileResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /settings/deliveryDates:
+    get:
+      summary: Retrieve delivery dates settings
+      operationId: ListDeliveryDatesSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+        - in: query
+          name: endDate
+          description: Filter by end date.
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          $ref: '#/components/responses/ListDeliveryDatesSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        default:
+          $ref: '#/components/responses/5xx'
+    post:
+      summary: Adds a new delivery / non-delivery date.
+      operationId: CreateDeliveryDateSettings
+      tags:
+        - Settings
+      requestBody:
+        $ref: '#/components/requestBodies/CreateDeliveryDatesSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CreateDeliveryDatesSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /settings/deliveryDates/{deliveryDateId}:
+    put:
+      summary: Update the delivery date settings.
+      operationId: UpdateDeliveryDateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/deliveryDateId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateDeliveryDateSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateDeliveryDateSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    delete:
+      summary: Delete the delivery date settings.
+      operationId: DeleteDeliveryDateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/deliveryDateId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /settings/deliveryDays:
+    get:
+      summary: Retrieve delivery days settings
+      operationId: GetDeliveryDaysSettings
+      tags:
+        - Settings
+      responses:
+        '200':
+          $ref: '#/components/responses/GetDeliveryDaysSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates delivery days settings
+      operationId: UpdateDeliveryDaysSettings
+      tags:
+        - Settings
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateDeliveryDaysSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateDeliveryDaysSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /settings/ordering:
+    get:
+      summary: Retrieve an ordering settings
+      operationId: GetOrderingSettings
+      tags:
+        - Settings
+      responses:
+        '200':
+          $ref: '#/components/responses/GetOrderingSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates ordering settings
+      operationId: UpdateOrderSettings
+      tags:
+        - Settings
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateOrderingSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateOrderSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers:
+    get:
+      summary: List all buyers
+      operationId: ListBuyers
+      description: |
+        To list all your buyers, send a GET request to `/v1/buyers`.
+      tags:
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+      responses:
+        '200':
+          $ref: '#/components/responses/ListBuyersResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers/{buyerId}/organisation:
+    get:
+      summary: Get detailed information about the buyer's organisation
+      operationId: GetBuyerOrganisation
+      description: |
+        To get details about a specific buyer's organisation, send a GET request to
+        `/v1/buyers/$BUYER_ID/organisation`.
+      tags:
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetBuyerOrganisationResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers/{buyerId}/settings/deliveryDates:
+    get:
+      summary: Retrieve buyer delivery dates settings
+      operationId: ListBuyerDeliveryDatesSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+        - in: query
+          name: endDate
+          description: Filter by end date.
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          $ref: '#/components/responses/ListBuyerDeliveryDatesSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        default:
+          $ref: '#/components/responses/5xx'
+    post:
+      summary: Adds a new delivery / non-delivery date for buyer.
+      operationId: CreateBuyerDeliveryDateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      requestBody:
+        $ref: '#/components/requestBodies/CreateBuyerDeliveryDateSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CreateDeliveryDatesSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers/{buyerId}/settings/deliveryDates/{deliveryDateId}:
+    put:
+      summary: Update the delivery date settings.
+      operationId: UpdateContractorDeliveryDateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+        - $ref: '#/components/parameters/deliveryDateId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateBuyerDeliveryDateSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateBuyerDeliveryDateSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    delete:
+      summary: Delete the delivery date settings.
+      operationId: DeleteContractorDeliveryDateSettings
+      tags:
+        - Settings
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+        - $ref: '#/components/parameters/deliveryDateId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers/{buyerId}/settings/deliveryDays:
+    get:
+      summary: Retrieve buyer delivery settings
+      operationId: GetBuyerDeliveryDaysSettings
+      tags:
+        - Settings
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetBuyerDeliveryDaysSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates buyer delivery days settings
+      operationId: UpdateBuyerDeliveryDaysSettings
+      tags:
+        - Settings
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateBuyerDeliveryDaysSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateBuyerDeliveryDaysSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /buyers/{buyerId}/settings/ordering:
+    get:
+      summary: Retrieve buyer ordering settings
+      operationId: GetBuyerOrderingSettings
+      tags:
+        - Settings
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetBuyerOrderingSettingsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates buyer ordering settings
+      operationId: UpdateBuyerOrderingSettings
+      tags:
+        - Settings
+        - Buyers
+      parameters:
+        - $ref: '#/components/parameters/buyerId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateOrderingSettingsRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateBuyerOrderingSettingsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Unknown product id has been specified.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders:
+    get:
+      summary: List all orders
+      operationId: ListOrders
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+        - name: statuses
+          in: query
+          description: |
+            Order status:
+             * `new` - The order was just created.
+             * `confirmed` - The order was reviewed by the supplier.
+             * `canceled` - The order was canceled by the buyer or supplier.
+             * `received` - The order was confirmed the receipt by buyer.
+             * `checked` - The order was checked the contents of delivered order for any issues by the buyer.
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - new
+                - confirmed
+                - canceled
+                - received
+                - checked
+          example: [ confirmed ]
+      responses:
+        '200':
+          $ref: '#/components/responses/ListOrdersResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Invalid order status filter.
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}:
+    get:
+      summary: Get order by specified ID
+      operationId: GetOrder
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetOrderResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/confirm:
+    post:
+      summary: Confirm the order by specified ID
+      operationId: ConfirmOrder
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      responses:
+        '204':
+          description: Success.
+        '400':
+          description: |
+            The order is already confirmed or can't be confirmed (only order in the status `new` can be confirmed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              examples:
+                already_confirmed:
+                  summary: |
+                    Occurs when trying to confirm an already confirmed order.
+                  value:
+                    code: 400
+                    message: The order is already confirmed
+                invalid_status:
+                  summary: |
+                    Occurs when trying to confirm an order when it is in a state from which the
+                    order cannot be confirmed.
+                  value:
+                    code: 400
+                    message: The order can't be confirmed
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/cancel:
+    post:
+      summary: Cancel the order by specified ID
+      operationId: CancelOrder
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      responses:
+        '204':
+          description: Success.
+        '400':
+          description: |
+            The order is already canceled or can't be canceled (only order
+            in the status `new` / `confirmed` can be canceled).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              examples:
+                already_canceled:
+                  summary: |
+                    Occurs when trying to cancel an already canceled order.
+                  value:
+                    code: 400
+                    message: The order is already canceled
+                invalid_status:
+                  summary: |
+                    Occurs when trying to cancel an order when it is in a state from which the
+                    order cannot be canceled.
+                  value:
+                    code: 400
+                    message: The order can't be canceled
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/items:
+    get:
+      summary: List an order items
+      operationId: ListOrderItems
+      description: |
+        Returns a list of Order items.
+
+        The special symbol "-" can be used as the order identifier, orderId, to indicate
+        that Order items must be returned for all orders.
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+        - name: statuses
+          in: query
+          description: |
+            Order item statuses:
+             * `new` - The order item was just created.
+             * `confirmed` - The order item was reviewed by the supplier.
+             * `canceled` - The order item was canceled by the buyer or supplier.
+             * `received` - The order item was confirmed the receipt by buyer.
+             * `checked` - The order item was checked the contents of delivered order for any issues by the buyer.
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - new
+                - confirmed
+                - canceled
+                - received
+                - checked
+          example: [ new ]
+      responses:
+        '200':
+          $ref: '#/components/responses/ListOrderItemsResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Invalid order status filter.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/items/batchCancel:
+    post:
+      summary: Sets the "CANCEL" status on all specified Order Items in batch.
+      operationId: BatchCancelOrderItems
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      requestBody:
+        $ref: '#/components/requestBodies/BatchCancelOrderItemsRequest'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/items/batchConfirm:
+    post:
+      summary: Sets the "CONFIRM" status on all specified Order Items in batch.
+      operationId: BatchConfirmOrderItems
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+      requestBody:
+        $ref: '#/components/requestBodies/BatchConfirmOrderItemsRequest'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /orders/{orderId}/comments:
+    get:
+      summary: List a order comments
+      operationId: ListOrderComments
+      tags:
+        - Orders
+      parameters:
+        - $ref: '#/components/parameters/orderId'
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+      responses:
+        '200':
+          $ref: '#/components/responses/ListOrderCommentsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /productCategories:
+    post:
+      summary: Create a new product category
+      operationId: CreateProductCategory
+      tags:
+        - Products
+      requestBody:
+        $ref: '#/components/requestBodies/CreateProductCategoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetProductCategoryResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    get:
+      summary: List a product categories
+      operationId: ListProductCategories
+      tags:
+        - Products
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 50
+          example: 20
+      responses:
+        '200':
+          $ref: '#/components/responses/ListProductCategoriesResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /productCategories/{productCategoryId}:
+    get:
+      summary: Get product category by specified ID
+      operationId: GetProductCategory
+      tags:
+        - Products
+      parameters:
+        - $ref: '#/components/parameters/productCategoryId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetProductCategoryResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Update product category attributes.
+      operationId: UpdateProductCategory
+      tags:
+        - Products
+      parameters:
+        - $ref: '#/components/parameters/productCategoryId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateProductCategoryRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetProductCategoryResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /productCategories/{productCategoryId}/children:
+    get:
+      summary: List a children product categories (subcategories).
+      operationId: ListProductCategoryChildren
+      tags:
+        - Products
+      parameters:
+        - $ref: '#/components/parameters/productCategoryId'
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 50
+          example: 20
+      responses:
+        '200':
+          $ref: '#/components/responses/ListProductCategoriesResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /prices/batchUpdate:
+    post:
+      summary: Batch update or create product prices.
+      operationId: BatchUpdatePrices
+      tags:
+        - Draft
+      parameters:
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum:
+              - addOrUpdate
+              - replaceAll
+            default: addOrUpdate
+      requestBody:
+        $ref: "#/components/requestBodies/BatchUpdatePricesRequest"
+      responses:
+        '202':
+          $ref: '#/components/responses/BatchUpdatePricesResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+  /products:
+    get:
+      summary: List a products.
+      operationId: ListProducts
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 50
+          example: 20
+      responses:
+        '200':
+          $ref: '#/components/responses/ListProductsResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        default:
+          $ref: '#/components/responses/5xx'
+    post:
+      summary: Create a new product.
+      operationId: CreateProduct
+      tags:
+        - Draft
+      requestBody:
+        $ref: '#/components/requestBodies/CreateProductRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CreateProductResponse'
+        '400':
+          description: Request has missing or invalid parameters and cannot be parsed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+              example:
+                code: 400
+                message: Price should not be negative.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /products/{productId}:
+    get:
+      summary: Returns the product details.
+      operationId: GetProduct
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetProductResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates the product attributes.
+      operationId: UpdateProduct
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateProductRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateProductResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    delete:
+      summary: Deletes the product.
+      operationId: DeleteProduct
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /products/{productId}/hide:
+    post:
+      summary: Makes the product hidden for Buyers.
+      operationId: HideProduct
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /products/{productId}/show:
+    post:
+      summary: Makes the product visible for Buyers.
+      operationId: ShowProduct
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /modifications:
+    get:
+      summary: List the product modifications.
+      operationId: ListProductModifications
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/pageToken'
+        - name: pageSize
+          in: query
+          description: |
+            The maximum number of results per page to return.
+            If the number of available results is larger than pageSize, the service returns
+            a nextPageToken than can be used to get the next page of results in subsequent request.
+
+            The maximum value is 100.
+          required: false
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 100
+            default: 10
+          example: 20
+        - name: externalProductModificationId
+          in: query
+          description: |
+            Filter by External ID (SKU in supplier system) for which there are modifications.
+          required: false
+          schema:
+            type: string
+          example: 'COLA123456'
+        - name: productId
+          in: query
+          description: |
+            Filter by Product ID for which there are modifications.
+          required: false
+          schema:
+            type: string
+          example: "123456"
+      responses:
+        '200':
+          $ref: '#/components/responses/ListProductModificationResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    post:
+      summary: Create the product modification.
+      operationId: CreateProductModification
+      tags:
+        - Draft
+      requestBody:
+        $ref: '#/components/requestBodies/CreateProductModificationRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/CreateProductModificationResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /modifications/{productModificationId}:
+    get:
+      summary: Returns the product modification details.
+      operationId: GetProductModification
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productModificationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/GetProductModificationResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    put:
+      summary: Updates the product modification attributes.
+      operationId: UpdateProductModification
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productModificationId'
+      requestBody:
+        $ref: '#/components/requestBodies/UpdateProductModificationRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/UpdateProductModificationResponse'
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+    delete:
+      summary: Deletes the product modification.
+      operationId: DeleteProductModification
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productModificationId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /modifications/{productModificationId}/hide:
+    post:
+      summary: Makes the product modification hidden for Buyers.
+      operationId: HideProductModification
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productModificationId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+  /modifications/{productModificationId}/show:
+    post:
+      summary: Makes the product modification visible for Buyers.
+      operationId: ShowProductModification
+      tags:
+        - Draft
+      parameters:
+        - $ref: '#/components/parameters/productModificationId'
+      responses:
+        '204':
+          description: Success.
+        '401':
+          $ref: '#/components/responses/401'
+        '404':
+          $ref: '#/components/responses/404'
+        default:
+          $ref: '#/components/responses/5xx'
+components:
+  requestBodies:
+    CreateDeliveryDatesSettingsRequest:
+      description: Create delivery / non-delivery dates request.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    UpdateDeliveryDateSettingsRequest:
+      description: Update delivery / non-delivery dates request.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    CreateBuyerDeliveryDateSettingsRequest:
+      description: Create buyer delivery / non-delivery dates request.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    UpdateBuyerDeliveryDateSettingsRequest:
+      description: Update buyer delivery / non-delivery dates request.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    UpdateBuyerDeliveryDaysSettingsRequest:
+      description: Update buyer delivery day settings data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    UpdateDeliveryDaysSettingsRequest:
+      description: Update delivery day settings data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    UpdateOrderingSettingsRequest:
+      description: Update ordering settings data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OrderingSettings'
+    CreateProductCategoryRequest:
+      description: Create product category data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductCategory'
+    UpdateProductCategoryRequest:
+      description: Update product category data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductCategory'
+    BatchUpdatePricesRequest:
+      required: true
+      description: Batch update prices request data.
+      content:
+        application/json:
+          schema:
+            type: array
+            description: List of product prices.
+            items:
+              type: object
+              required:
+                - externalProductModificationId
+                - externalBuyerId
+                - price
+              properties:
+                externalProductModificationId:
+                  type: string
+                  description: The external ID (in supplier system) of final product that the buyer is offered to buy.
+                externalBuyerId:
+                  type: string
+                  description: The ID of buyer organisation (in integrator system) that made the order.
+                price:
+                  type: integer
+                  description: Price in cents.
+          example:
+            - externalProductModificationId: 'COKE12345'
+              externalBuyerId: 'BUYER123'
+              price: 10000
+    CreateProductRequest:
+      description: Create a product request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Product'
+          example:
+            displayName: 'Coca Cola'
+            description: A carbonated soft drink manufactured by the Coca-Cola Company.
+            categoryId: '6543'
+            imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+            modifications:
+              - id: 4444
+                balance: 120
+                size:
+                  amount: '330'
+                  unit: 'ml'
+                packaging: 'Bottle'
+                barcode: '0 4936509'
+                quantity: 1
+                isVisible: true
+                externalProductModificationId: 'COKE12345'
+    UpdateProductRequest:
+      description: Update a product request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Product'
+          example:
+            id: 1234
+            displayName: 'Coca Cola'
+            description: A carbonated soft drink manufactured by the Coca-Cola Company.
+            categoryId: '6543'
+            imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+            modifications:
+              - id: 4444
+                balance: 120
+                size:
+                  amount: '330'
+                  unit: 'ml'
+                packaging: 'Bottle'
+                barcode: '0 4936509'
+                quantity: 1
+                isVisible: true
+                externalProductModificationId: 'COKE12345'
+    CreateProductModificationRequest:
+      description: Create a product modification request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductModification'
+          example:
+            productId: 1
+            balance: 120
+            size:
+              amount: '330'
+              unit: 'ml'
+            packaging: 'Bottle'
+            barcode: '0 4936509'
+            quantity: 1
+            isVisible: true
+            externalProductModificationId: 'COKE12345'
+            price:
+              amount: 3444
+    UpdateProductModificationRequest:
+      description: Update a product modification request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductModification'
+          example:
+            id: 4444
+            balance: 120
+            size:
+              amount: '330'
+              unit: 'ml'
+            packaging: 'Bottle'
+            barcode: '0 4936509'
+            quantity: 1
+            isVisible: true
+            externalProductModificationId: 'COKE12345'
+    BatchCancelOrderItemsRequest:
+      description: Batch cancel a order item request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            required:
+              - orderItemIds
+            properties:
+              orderItemIds:
+                type: array
+                items:
+                  type: string
+                example: [ 112233, 445566, 123123, 456456 ]
+    BatchConfirmOrderItemsRequest:
+      description: Batch confirm a order item request data.
+      required: true
+      content:
+        application/json:
+          schema:
+            required:
+              - orderItemIds
+            properties:
+              orderItemIds:
+                type: array
+                items:
+                  type: string
+                example: [ 112233, 445566, 123123, 456456 ]
+  responses:
+    '401':
+      description: Not authorized request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: 401
+            message: Request not authenticated due to missing, invalid, or expired API token.
+    '404':
+      description: The resource specified does not exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: 404
+            message: The order not found
+    '5xx':
+      description: An unexpected condition occurred that prevented the server from fulfilling the request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            code: 500
+            message: Internal server error.
+    GetBusinessProfileResponse:
+      description: Retrieve business profile response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BusinessProfile'
+    ListBuyerDeliveryDatesSettingsResponse:
+      description: The response of buyer delivery dates settings.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - deliveryDates
+            properties:
+              deliveryDates:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeliveryDate'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+    ListDeliveryDatesSettingsResponse:
+      description: The response of delivery dates settings.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - deliveryDates
+            properties:
+              deliveryDates:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeliveryDate'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+    CreateDeliveryDatesSettingsResponse:
+      description: The response of new delivery dates settings.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    UpdateDeliveryDateSettingsResponse:
+      description: The response of update delivery dates settings.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    UpdateBuyerDeliveryDateSettingsResponse:
+      description: The response of update buyer delivery dates settings.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDate'
+    GetBuyerDeliveryDaysSettingsResponse:
+      description: Retrieve buyer delivery settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    UpdateBuyerDeliveryDaysSettingsResponse:
+      description: Update buyer delivery settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    GetDeliveryDaysSettingsResponse:
+      description: Retrieve delivery settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    UpdateDeliveryDaysSettingsResponse:
+      description: Update delivery settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DeliveryDaySettings'
+    GetOrderingSettingsResponse:
+      description: Retrieve an order settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OrderingSettings'
+          example:
+            minimumOrderAmount: 10000
+    UpdateOrderSettingsResponse:
+      description: Updates an order settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OrderingSettings'
+          example:
+            minimumOrderAmount: 10000
+    GetBuyerOrderingSettingsResponse:
+      description: Retrieve an order settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OrderingSettings'
+          example:
+            minimumOrderAmount: 10000
+    UpdateBuyerOrderingSettingsResponse:
+      description: Updates an order settings response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OrderingSettings'
+          example:
+            minimumOrderAmount: 10000
+    ListOrdersResponse:
+      description: A paged array of orders.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - orders
+            properties:
+              orders:
+                type: array
+                nullable: true
+                items:
+                  $ref: '#/components/schemas/Order'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+          example:
+            nextPageToken: 'If-BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggECAQIA'
+            orders:
+              - id: '1234'
+                createTime: '2022-01-01T05:45:12+05:00'
+                deliveryDate: '2022-01-04'
+                totalVatAmount:
+                  amount: 1380
+                  currencyCode: EUR
+                totalNetAmount:
+                  amount: 6000
+                  currencyCode: EUR
+                totalDeliveryFee:
+                  amount: 0
+                  currencyCode: EUR
+                status: new
+                deliveryAddress: Dublin, Republic of Ireland
+                buyerId: '140'
+                externalBuyerId: '410'
+    ListBuyersResponse:
+      description: A paged array of buyers.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+              - buyers
+            properties:
+              buyers:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Buyer'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+    GetBuyerOrganisationResponse:
+      description: A detailed information about specified organisation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Organisation'
+          example:
+            id: '42'
+            vatNumber: '1234567WA'
+            displayName: 'Example Company'
+            logoUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/organisation/42/logo.jpeg'
+            address: 'Dublin City Centre Revenue District 9-10 Upper O`Connell Street Dublin 1'
+    GetOrderResponse:
+      description: A detailed information about specified order.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Order'
+          example:
+            id: '1234'
+            createTime: '2022-01-01T05:45:12+05:00'
+            deliveryDate: '2022-01-04'
+            totalVatAmount:
+              amount: 1380
+              currencyCode: EUR
+            totalNetAmount:
+              amount: 6000
+              currencyCode: EUR
+            totalDeliveryFee:
+              amount: 0
+              currencyCode: EUR
+            status: new
+            deliveryAddress: Dublin, Republic of Ireland
+            buyerId: '140'
+            externalBuyerId: '410'
+    ListOrderCommentsResponse:
+      description: A paged array of order comments.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              comments:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Comment'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+            example:
+              nextPageToken: 'BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggEEAQIA'
+              comments:
+                - id: '1202'
+                  createTime: '2022-08-03T10:16:28+05:00'
+                  message: 'How much exactly is this butter?'
+                - id: '1234'
+                  createTime: '2022-08-03T12:36:34+05:00'
+                  message: 'Add 2 apples to this order.'
+    ListOrderItemsResponse:
+      description: A paged array of order items.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              orderItems:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrderItem'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+            example:
+              nextPageToken: BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggEBAQIA
+              orderItems:
+                - id: '1234'
+                  productModificationId: '4567'
+                  externalProductModificationId: 'P00612'
+                  quantity: 10
+                  size: 2.5
+                  totalVatAmount:
+                    amount: 123
+                    currencyCode: EUR
+                  totalNetAmount:
+                    amount: 4123
+                    currencyCode: EUR
+    ListProductCategoriesResponse:
+      description: A paged array of product categories.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              productCategories:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProductCategory'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+            example:
+              nextPageToken: BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggEBAQIA
+              productCategories:
+                - id: '1234'
+                  displayName: 'Meats'
+                - id: '3456'
+                  displayName: 'Chicken'
+                  parentCategoryId: '1234'
+                - id: '4567'
+                  displayName: 'Juices'
+    GetProductCategoryResponse:
+      description: A detailed information about specified product category.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductCategory'
+          example:
+            id: '1234'
+            displayName: 'Meats'
+    ListProductsResponse:
+      description: A paged array of products.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              products:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+            example:
+              nextPageToken: BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggEBAQIA
+              products:
+                - id: 1324
+                  displayName: 'Onion'
+                  categoryId: '3456'
+                  imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/42/onion.jpeg'
+                  modifications: [ ]
+                - id: 4567
+                  displayName: 'Coca Cola'
+                  description: A carbonated soft drink manufactured by the Coca-Cola Company.
+                  categoryId: '6543'
+                  imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+                  modifications:
+                    - id: 4444
+                      balance: 120
+                      size:
+                        amount: '330'
+                        unit: 'ml'
+                      packaging: 'Bottle'
+                      barcode: '0 4936509'
+                      quantity: 1
+                      isVisible: true
+                      externalProductModificationId: 'COKE12345'
+    CreateProductResponse:
+      description: A created product details response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Product'
+          example:
+            id: 4567
+            displayName: 'Coca Cola'
+            description: A carbonated soft drink manufactured by the Coca-Cola Company.
+            categoryId: '6543'
+            imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+    GetProductResponse:
+      description: A product details response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Product'
+          example:
+            id: 4567
+            displayName: 'Coca Cola'
+            description: A carbonated soft drink manufactured by the Coca-Cola Company.
+            categoryId: '6543'
+            imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+            modifications:
+              - id: 4444
+                balance: 120
+                size:
+                  amount: '330'
+                  unit: 'ml'
+                packaging: 'Bottle'
+                barcode: '0 4936509'
+                quantity: 1
+                isVisible: true
+                externalProductModificationId: 'COKE12345'
+    UpdateProductResponse:
+      description: Update a product response data.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Product'
+          example:
+            id: 4567
+            displayName: 'Coca Cola'
+            description: A carbonated soft drink manufactured by the Coca-Cola Company.
+            categoryId: '6543'
+            imageUrl: 'https://unifyordering.s3.eu-west-1.amazonaws.com/products/coke.jpeg'
+    ListProductModificationResponse:
+      description: A paged array of product modifications (for specified product).
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              productModification:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProductModification'
+              nextPageToken:
+                $ref: '#/components/schemas/nextPageToken'
+            example:
+              nextPageToken: BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggEBAQIA
+              productModification:
+                - id: 4444
+                  balance: 120
+                  size:
+                    amount: '330'
+                    unit: 'ml'
+                  packaging: 'Bottle'
+                  barcode: '0 4936509'
+                  quantity: 1
+                  isVisible: true
+                  externalProductModificationId: 'COKE12345'
+    CreateProductModificationResponse:
+      description: A created product modification details response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductModification'
+          example:
+            id: 4444
+            balance: 120
+            size:
+              amount: '330'
+              unit: 'ml'
+            packaging: 'Bottle'
+            barcode: '0 4936509'
+            quantity: 1
+            isVisible: true
+            externalProductModificationId: 'COKE12345'
+    GetProductModificationResponse:
+      description: A product modification details response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductModification'
+          example:
+            id: 4444
+            balance: 120
+            size:
+              amount: '330'
+              unit: 'ml'
+            packaging: 'Bottle'
+            barcode: '0 4936509'
+            quantity: 1
+            isVisible: true
+            externalProductModificationId: 'COKE12345'
+    UpdateProductModificationResponse:
+      description: Update product modification details response.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ProductModification'
+          example:
+            id: 4444
+            balance: 50
+            size:
+              amount: '330'
+              unit: 'ml'
+            packaging: 'Bottle'
+            barcode: '0 4936509'
+            quantity: 1
+            isVisible: true
+            externalProductModificationId: 'COKE12345'
+    BatchUpdatePricesResponse:
+      description: Batch update prices response data.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Operation"
+  securitySchemes:
+    ApiKeyJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        To receive a token, send a POST request with client credentials (CLIENTID and CLIENTSECRET) and indication
+        of the flow type to https://oauth.unifyordering.com/oauth2/token.
+
+        If you do not have client credentials yet, request them from the our support team.
+
+        Client credentials can be passed both through the standard HTTP authentication mechanism and through HTTP request
+        parameters.
+        An example request with HTTP client authentication using curl:
+
+        ```bash
+        curl -X POST -u CLIENTID:CLIENTSECRET 'https://oauth.unifyordering.com/oauth2/token' -d 'grant_type=client_credentials'
+        ```
+  schemas:
+    ApiError: # inspired by https://cloud.google.com/apis/design/errors
+      type: object
+      description: The `ApiError` defines a logical error model in API.
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          description: The code of error.
+          format: int32
+          example: 404
+        message:
+          type: string
+          description: A developer-facing human-readable error message.
+          example: 'entity with id #1234 not found'
+        details:
+          type: array
+          description: A list of additional data that carry the error details.
+          items:
+            type: object
+            description: Contains an arbitrary serialized data that describes the extra error details.
+            additionalProperties: true
+            example:
+              entityId: 1234
+    BusinessProfile:
+      type: object
+      required:
+        - displayName
+        - emails
+      properties:
+        displayName:
+          type: string
+          description: The business name for display in the UI.
+          example: 'McCallum Pub & Restaurant'
+        emails:
+          type: array
+          items:
+            type: string
+            format: email
+          example: [ 'example1@example.com', 'example2@example.com' ]
+    DeliveryDate:
+      type: object
+      required:
+        - id
+        - startDate
+        - canDeliver
+        - periodic
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The delivery date unique ID in UnifyOrdering system.
+          example: 01H3KQR44GF5YS4WXEADPEARKH
+        startDate:
+          type: string
+          format: date
+          description: Indicates the beginning of the period (delivery/non-delivery). Should be in the future.
+          example: '2023-01-04'
+        endDate:
+          type: string
+          format: date
+          description: Indicates the end of the period (delivery/non-delivery). Optional, should be in future.
+          example: '2023-01-10'
+        canDeliver:
+          type: boolean
+          description: Indicates that delivery is possible on that dates.
+          example: true
+        note:
+          type: string
+          description: Optional text commentary for the users needs (max 100 characters).
+          maxLength: 100
+        periodic:
+          type: object
+          properties:
+            frequency:
+              type: string
+              enum:
+                - day
+                - week
+                - month
+              description: |
+                Describes a recurring period: day, week, month.
+              example: day
+            interval:
+              type: integer
+              description: |
+                Describes a step of repetition. E.g. interval=2, frequency=week interprets as “every 2 week”.
+              minimum: 0
+              example: 2
+    DeliveryDay:
+      type: object
+      properties:
+        canDeliver:
+          type: boolean
+          description: The value of this field indicates whether delivery is possible on this day or not.
+        cutOff:
+          type: object
+          required:
+            - daysBefore
+            - timeBefore
+          properties:
+            daysBefore:
+              type: integer
+              minimum: 0
+              maximum: 5
+              example: 5
+            timeBefore:
+              type: string
+              example: "15:00"
+    DeliveryDaySettings:
+      type: object
+      required:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+        - sat
+        - sun
+      properties:
+        mon:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        tue:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        wed:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        thu:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        fri:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        sat:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+        sun:
+          allOf:
+            - $ref: "#/components/schemas/DeliveryDay"
+    OrderingSettings:
+      type: object
+      required:
+        - minimumOrderAmount
+      properties:
+        minimumOrderAmount:
+          type: integer
+          description: |
+            Amount should be a monetary value using a currency's smallest unit (e.g. euro cents, penny, usd cents).
+          minimum: 0
+          example: 10000
+    Organisation:
+      type: object
+      required:
+        - id
+        - displayName
+        - businessAddress
+        - createTime
+      properties:
+        id:
+          type: string
+          description: The organisation ID in UnifyOrdering system.
+          example: '170'
+        vatNumber:
+          type: string
+          description: The unique number that identifies a taxable person (business).
+          example: '1234567X'
+        displayName:
+          type: string
+          description: The organisation name for display in the UI.
+          example: 'McCullum Pub & Restaurant'
+        logoUrl:
+          type: string
+          description: The organisation logo image URL.
+          example: https://unify-logos.s3.eu-west-1.amazonaws.com/org/logos/1234-5678.jpeg
+        businessAddress:
+          type: string
+          description: The organisation address.
+          example: 'Main Street, Ballygillaroe, Redcross, Co. Wicklow, A67 H799, Republic of Ireland'
+        createTime:
+          type: string
+          format: date-time
+          description: |
+            The time of comment will be added. String in [RFC3339](https://www.ietf.org/rfc/rfc3339.txt) text format.
+          example: '2017-07-21T17:32:28Z'
+    Buyer:
+      type: object
+      required:
+        - id
+        - externalBuyerId
+      properties:
+        id:
+          type: string
+          description: The Buyer ID in UnifyOrdering system or the Buyer Account ID (supplier-side identifier).
+          readOnly: true
+          example: '98762'
+        externalBuyerId:
+          type: string
+          description: The ID of buyer organisation (in integrator system) that made the order.
+          example: 'EX-12345'
+    Comment:
+      type: object
+      required:
+        - id
+        - orderId
+        - message
+        - createTime
+      properties:
+        id:
+          type: string
+          description: The order comment ID in UnifyOrdering system.
+          example: '3456'
+        orderId:
+          type: string
+          description: the ID of the order for which this comment was added.
+          example: '1234'
+        createTime:
+          type: string
+          format: date-time
+          description: |
+            The time of comment will be added. String in [RFC3339](https://www.ietf.org/rfc/rfc3339.txt) text format.
+          example: '2017-07-21T17:32:28Z'
+        message:
+          type: string
+          description: A message.
+          example: 'butter must be at least 82% fat'
+    OrderItem:
+      type: object
+      required:
+        - id
+        - orderId
+        - productModificationId
+        - quantity
+        - price
+        - totalNetAmount
+        - totalVatAmount
+      properties:
+        id:
+          type: string
+          description: The order item ID in UnifyOrdering system.
+          example: '4356'
+        orderId:
+          type: string
+          description: the ID of the order for which this item was added.
+          example: '1234'
+        productModificationId:
+          type: string
+          description: The ID of final product that the buyer is offered to buy
+          example: '4242'
+        externalProductModificationId:
+          type: string
+          description: The external ID (in supplier system) of final product that the buyer is offered to buy.
+          example: 'COLA123'
+        quantity:
+          type: integer
+          description: The amount of product ordered.
+          example: 12
+        size:
+          type: number
+          description: The size ordered product (for a weight product).
+          example: 1
+        price:
+          $ref: '#/components/schemas/Money'
+        totalVatAmount:
+          $ref: '#/components/schemas/Money'
+        totalNetAmount:
+          $ref: '#/components/schemas/Money'
+    Order:
+      type: object
+      required:
+        - id
+        - createTime
+        - deliveryDate
+        - totalVatAmount
+        - totalNetAmount
+        - totalDeliveryFee
+        - status
+        - deliveryAddress
+        - deliveryAddressDetails
+        - contractorId
+        - buyerId
+        - externalContractorId
+        - externalBuyerId
+        - externalId
+      properties:
+        id:
+          type: string
+          description: The order ID in UnifyOrdering system.
+          example: '12345'
+        createTime:
+          type: string
+          format: date-time
+          description: |
+            The timestamp when this order will be created.
+            String in [RFC3339](https://www.ietf.org/rfc/rfc3339.txt) text format.
+          example: '2017-07-21T17:32:28Z'
+        deliveryDate:
+          type: string
+          format: date
+          description: The date when this order will be delivered.
+          example: '2023-01-04'
+        totalVatAmount:
+          $ref: '#/components/schemas/Money'
+        totalNetAmount:
+          $ref: '#/components/schemas/Money'
+        totalDeliveryFee:
+          $ref: '#/components/schemas/Money'
+        status:
+          type: string
+          description: The current status of the order.
+          example: 'confirmed'
+        deliveryAddress:
+          type: string
+          description: The address to which the order will be delivered.
+          example: '15 Merrion Row, Dublin, Republic of Ireland'
+        deliveryAddressDetails:
+          description: The address (structured) to which the order will be delivered.
+          allOf:
+            - $ref: '#/components/schemas/AddressDetails'
+          example:
+            address1: '15 Merrion Row'
+            address2: 'Dublin 2'
+            county: 'Dublin'
+            country: 'Republic of Ireland'
+            postalTown: 'Dublin'
+            postalCode: 'D02 RP20'
+        contractorId:
+          type: string
+          description: |
+            The ID of buyer organisation (in UnifyOrdering) that made the order.
+
+            This field is **deprecated**. Use `buyerId` instead.
+          deprecated: true
+          example: '12345'
+        buyerId:
+          type: string
+          description: The ID of buyer organisation (in UnifyOrdering) that made the order.
+          example: '12345'
+        externalContractorId:
+          type: string
+          description: |
+            The ID of buyer organisation (in integrator system) that made the order.
+
+            This field is **deprecated**. Use `externalBuyerId` instead.
+          example: 'EX-12345'
+        externalBuyerId:
+          type: string
+          description: The ID of buyer organisation (in integrator system) that made the order.
+          example: 'EX-12345'
+        externalId:
+          type: string
+          description: The external ID (in supplier system) of the order.
+          example: 'ORD123'
+          nullable: true
+        additionalBuyerField1:
+          type: string
+          description: Additional buyer field 1 from the monolith API.
+          nullable: true
+        additionalBuyerField2:
+          type: string
+          description: Additional buyer field 2 from the monolith API.
+          nullable: true
+    AddressDetails:
+      type: object
+      required:
+        - address1
+        - country
+        - county
+      properties:
+        address1:
+          type: string
+          description: The first line of the address.
+          example: '15 Merrion Row'
+        address2:
+          type: string
+          description: The second line of the address.
+          example: 'Dublin 2'
+        county:
+          type: string
+          description: The city of the address.
+          example: 'Dublin'
+        country:
+          type: string
+          description: The country of the address.
+          example: 'Republic of Ireland'
+        countryCode:
+          type: string
+          description: The country code of the address in ISO 3166-1 alpha-2 format.
+          example: 'IE'
+        postalTown:
+          type: string
+          description: The postal town of the address.
+          example: 'Dublin'
+        postalCode:
+          type: string
+          description: The postal code of the address.
+          example: 'D02 RP20'
+    Money:
+      type: object
+      required:
+        - amount
+        - currencyCode
+      properties:
+        amount:
+          type: number
+          description: |
+            Amount should be a monetary value using a currency's smallest unit (e.g. euro cents, penny, usd cents).
+          example: 1000
+        currency:
+          type: string
+          readOnly: true
+          description: The alphabetic currency code. In ISO 4217 format.
+          example: EUR
+    ProductSize:
+      type: object
+      required:
+        - amount
+        - unit
+      properties:
+        amount:
+          type: string
+          description: The product size.
+          example: '12'
+        unit:
+          type: string
+          description: The product modification size units.
+          enum:
+            - 'L'
+            - 'ml'
+            - 'g'
+            - 'kg'
+            - 'in'
+            - 'cm'
+            - 'lbs'
+            - 'cl'
+            - 'm'
+            - 'oz'
+            - 'Per Unit'
+            - 'pint'
+            - 'mm'
+            - 'w'
+            - 'gsm'
+            - 'mg'
+            - 'cc'
+          example: 'kg'
+    ProductCategory:
+      type: object
+      required:
+        - id
+        - displayName
+      properties:
+        id:
+          type: string
+          description: The product category ID in UnifyOrdering system.
+          readOnly: true
+          example: '4567'
+        displayName:
+          type: string
+          description: The product category name for display in the UI.
+          maxLength: 150
+          example: 'Soft Drinks'
+        parentCategoryId:
+          type: string
+          description: The parent category ID, when current category is subcategory.
+          example: '4500'
+    Product:
+      type: object
+      required:
+        - id
+        - displayName
+        - categoryId
+      properties:
+        id:
+          type: string
+          description: The product unique ID in UnifyOrdering system.
+          readOnly: true
+          example: '42'
+        displayName:
+          type: string
+          description: The product name for display in the UI.
+          example: Coca-Cola
+        description:
+          type: string
+          description: The product description.
+          example: Delicious soft-drink ever.
+        categoryId:
+          type: string
+          description: The unique ID of product category for this product.
+          example: '456'
+        imageUrl:
+          type: string
+          description: The product image URL.
+          example: https://unify-img.s3.eu-west1.amazonaws.com/products/images/1234567-98772.jpeg
+        modifications:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProductModification"
+          readOnly: true
+          example:
+            - id: 4444
+              balance: 120
+              size:
+                amount: '330'
+                unit: 'ml'
+              packaging: 'Bottle'
+              barcode: '0 4936509'
+              quantity: 1
+              isVisible: true
+              externalProductModificationId: 'COKE12345'
+              price:
+                amount: 1400
+                currencyCode: EUR
+    Operation:
+      type: object
+      required:
+        - id
+        - description
+        - createdAt
+        - done
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "the unique ID of the Operation"
+          example: "6D3692C3-F75E-4BFB-B298-14EDA32BFECD"
+          readOnly: true
+        description:
+            type: string
+            description: "a human readable, short description of the Operation"
+            example: "Import job #1234 for org #4567"
+        createdAt:
+            type: string
+            format: date-time
+            description: "the Operation creation time. Specified in RFC3339 format."
+            example: "2021-03-04T19:02:42+00:00"
+            readOnly: true
+        updatedAt:
+            type: string
+            format: date-time
+            description: "the time the Operation was last modified. Specified in RFC3339 format."
+            example: "2022-01-02T19:04:12+00:00"
+            readOnly: true
+        done:
+            type: boolean
+            description: |
+              Status of the operation.
+
+              *true* -- the operation is completed.
+              The operation is considered completed, even if an error occurred during its execution.
+
+              *false* -- the operation is not completed.
+            readOnly: true
+            example: true
+        response:
+            type: object
+            additionalProperties: { }
+            description: |
+              Contains the result of the operation if it is important to the user.
+
+              The field is present only if the operation was completed successfully.
+              The *error* and *response* fields are mutually exclusive.
+            readOnly: true
+            example:
+              generatedReportUrl: 'https://report-bucket.s3.eu-west-1.amazonaws.com/123-456-789/report.xlsx'
+        error:
+            type: object
+            description: |
+              Error message.
+
+              This field is present if an error occurred during the operation.
+              The *error* and *response* fields are mutually exclusive.
+            readOnly: true
+            required:
+              - code
+            properties:
+              code:
+                type: string
+                description: the code of error
+                example: import_job.duplicate_item
+              details:
+                type: object
+                additionalProperties: { }
+                description: A list of additional data that carry the error details.
+                example:
+                  duplicateItems: [ 1, 2, 3, 4 ]
+    ProductModification:
+      type: object
+      required:
+        - id
+        - productId
+        - packaging
+        - isVisible
+      properties:
+        id:
+          type: string
+          description: The product modification unique ID in UnifyOrdering system.
+          readOnly: true
+          example: '325'
+        productId:
+          type: string
+          description: The product ID in UnifyOrdering system.
+          example: '1234'
+        balance:
+          type: number
+          description: |
+            The stock balance of the product modification.
+
+            If not set, then the quantity in stock is not limited.
+          nullable: true
+          example: 255
+        size:
+          $ref: '#/components/schemas/ProductSize'
+        packaging:
+          type: string
+          description: The product modification packaging.
+          enum:
+            - 'Per Kg'
+            - 'Pack'
+            - 'Per L'
+            - 'Box'
+            - 'Single'
+            - 'Per Lb'
+            - 'Jug'
+            - 'Jar'
+            - 'Case'
+            - 'Bag'
+            - 'Tray'
+            - 'Tub'
+            - 'Punnet'
+            - 'Side'
+            - 'Carton'
+            - 'Head'
+            - 'Tin'
+            - 'Bunch'
+            - 'Bottle'
+            - 'Bale'
+            - 'Roll'
+            - 'Custom'
+            - 'Bucket'
+            - 'Gallon'
+            - 'Per Oz'
+            - 'Pcs'
+          example: 'Per Kg'
+        barcode:
+          type: string
+          description: The product modification barcode.
+          example: '12345678'
+        quantity:
+          type: number
+          description: The product modification quantity in unit.
+          example: 10
+        isVisible:
+          type: boolean
+          description: The product modification visibility (for Buyers).
+          example: false
+        externalProductModificationId:
+          type: string
+          description: |
+            The external ID (in supplier system) of product modification
+            that the buyer is offered to buy.
+
+            Synonym of SKU (stock keeping unit).
+          example: 'COLA123'
+        price:
+          $ref: '#/components/schemas/Money'
+    nextPageToken:
+      type: string
+      description: |
+        This token allows you to get the next page of results for list requests. If the number of results
+        is larger than pageSize, use the nextPageToken as the value for the pageToken query parameter in
+        the next list request. Each subsequent list request will have its own nextPageToken to continue paging
+        through the results.
+      example: 'If-BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggECAQIA'
+  parameters:
+    pageToken:
+      name: pageToken
+      in: query
+      description: |
+        A string token returned in the response of your previous request.
+        If pageToken is provided, it's used to retrieve the next page of order results.
+      required: false
+      schema:
+        type: string
+      example: 'If-BAwEC_4IAAQIBBk9mZnNldAEEAAEFTGltaXQBBAAAAAf_ggECAQIA'
+    deliveryDateId:
+      name: deliveryDateId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: The delivery date ID inside UnifyOrdering system.
+    buyerId:
+      name: buyerId
+      in: path
+      required: true
+      description: The buyer ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '123456'
+    productSettingsId:
+      name: productSettingsId
+      in: path
+      required: true
+      description: The contractor product settings ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '456789'
+    orderId:
+      name: orderId
+      in: path
+      required: true
+      description: The order ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '42'
+    productCategoryId:
+      name: productCategoryId
+      in: path
+      required: true
+      description: The product category ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '1'
+    productId:
+      name: productId
+      in: path
+      required: true
+      description: The product ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '1234'
+    productModificationId:
+      name: productModificationId
+      in: path
+      required: true
+      description: The product modification ID inside UnifyOrdering system.
+      schema:
+        type: string
+      example: '1235'
+tags:
+  - name: Draft
+    description: Release version could have minimal changes.
+  - name: Products
+    description: Product catalog management API
+  - name: Buyers
+    description: Buyers management API
+  - name: Orders
+    description: Orders management API
+  - name: Settings
+    description: Settings management API
