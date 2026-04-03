@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     @property
     def normalized_database_url(self) -> str:
         url = self.DATABASE_URL.strip()
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+psycopg://", 1)
+
+        if url.startswith("postgresql+psycopg://"):
+            return url
+
         if not url.startswith("sqlite:///./"):
             return url
 
