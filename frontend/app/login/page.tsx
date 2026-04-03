@@ -59,8 +59,8 @@ export default function LoginPage() {
           <Image
             src="/log.png"
             alt="Ziffera logo"
-            width={45}
-            height={45}
+            width={55}
+            height={55}
             className="rounded-3xl bg-white p-2 shadow-[0_20px_40px_-18px_rgba(15,23,42,0.16)]"
             priority
           />
@@ -116,6 +116,23 @@ export default function LoginPage() {
           >
             {loading ? "Signing in..." : "Login"}
           </button>
+
+          <div className="mt-6 space-y-1 text-center text-sm text-slate-400">
+            <p>
+              Developed by <span className="font-medium text-slate-500">Ziffera</span>
+            </p>
+            <p>
+              <a
+                href="https://www.ziffera.ie"
+                target="_blank"
+                rel="noreferrer"
+                className="transition hover:text-slate-500"
+              >
+                www.ziffera.ie
+              </a>
+            </p>
+            <p className="text-xs">Simple digital solutions for local businesses</p>
+          </div>
         </form>
       </div>
     </main>

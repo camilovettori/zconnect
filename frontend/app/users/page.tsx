@@ -65,11 +65,21 @@ export default function UsersPage() {
     setError("");
     try {
       const response = await fetch("/api/users", { cache: "no-store" });
-      const payload = await response.json();
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload?.error || "Failed to load users");
       }
-      setUsers(payload.users ?? []);
+      const nextUsers = Array.isArray(payload?.users)
+        ? payload.users
+            .filter((user: Partial<UserRow> | null | undefined) => Boolean(user && user.id))
+            .map((user: Partial<UserRow>) => ({
+              id: String(user.id || ""),
+              email: String(user.email || ""),
+              role: String(user.role || "user"),
+              created_at: user.created_at ? String(user.created_at) : null,
+            }))
+        : [];
+      setUsers(nextUsers);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load users");
     } finally {
@@ -100,15 +110,17 @@ export default function UsersPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password, role }),
       });
-      const payload = await response.json();
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(payload?.error || "Failed to create user");
       }
+      const createdUser = payload?.user;
+      const createdEmail = String(createdUser?.email || email || "");
       setCreateOpen(false);
       setEmail("");
       setPassword("");
       setRole("user");
-      setSuccess(`User ${payload?.user?.email || email} created successfully`);
+      setSuccess(createdEmail ? `User ${createdEmail} created successfully` : "User created successfully");
       await loadUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create user");
