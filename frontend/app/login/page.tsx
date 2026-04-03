@@ -59,8 +59,8 @@ export default function LoginPage() {
           <Image
             src="/log.png"
             alt="Ziffera logo"
-            width={76}
-            height={76}
+            width={45}
+            height={45}
             className="rounded-3xl bg-white p-2 shadow-[0_20px_40px_-18px_rgba(15,23,42,0.16)]"
             priority
           />
