@@ -1,6 +1,6 @@
 # Zconnect
 
-A full-stack integration system built to automate invoice creation between Unify Ordering and Zoho Books.
+A full-stack integration system built to automate invoice creation between Unify Ordering and Zoho Invoice.
 
 ---
 
