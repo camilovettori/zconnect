@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-const WEEKDAY_LABELS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+const WEEKDAY_LABELS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 function toDateKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -18,7 +18,7 @@ function addMonths(date: Date, amount: number) {
 
 function buildMonthDays(month: Date) {
   const firstDay = startOfMonth(month);
-  const startOffset = firstDay.getDay();
+  const startOffset = (firstDay.getDay() + 6) % 7;
   const daysInMonth = new Date(firstDay.getFullYear(), firstDay.getMonth() + 1, 0).getDate();
   const days: Array<Date | null> = [];
 
