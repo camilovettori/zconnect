@@ -860,6 +860,7 @@ class UnifyService:
         include_address_fallback: bool = True,
     ) -> Optional[str]:
         buyer = raw.get("buyer") if isinstance(raw.get("buyer"), dict) else {}
+        customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
         buyer_key = str(buyer_id).strip() if buyer_id is not None and str(buyer_id).strip() else ""
 
         candidates = [
@@ -882,6 +883,15 @@ class UnifyService:
             buyer.get("additional_buyer_field1"),
             buyer.get("additionalBuyerField2"),
             buyer.get("additional_buyer_field2"),
+            customer.get("name"),
+            customer.get("displayName"),
+            customer.get("display_name"),
+            customer.get("companyName"),
+            customer.get("company_name"),
+            customer.get("businessName"),
+            customer.get("business_name"),
+            customer.get("organizationName"),
+            customer.get("organization_name"),
         ]
         if include_address_fallback:
             candidates.append(self._extract_delivery_address_text(raw.get("deliveryAddress") or raw.get("delivery_address") or {}))
