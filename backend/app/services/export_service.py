@@ -16,6 +16,7 @@ class ExportServiceError(Exception):
 
 
 logger = logging.getLogger(__name__)
+ORIGINAL_ZOHO_CREATE_DRAFT_INVOICE = ZohoService.create_draft_invoice
 
 ZOHO_STANDARD_TAX_ID = "229622000000038161"
 ZOHO_REDUCED_TAX_ID = "229622000000038157"
@@ -272,13 +273,12 @@ class ExportService:
                 fallback_to_direct_line,
             )
             logger.info(
-                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s payload=%s",
+                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s",
                 order.order_id,
                 resolved_name,
                 None,
                 False,
                 fallback_to_direct_line,
-                final_payload,
             )
             return final_payload
 
@@ -309,13 +309,12 @@ class ExportService:
                 fallback_to_direct_line,
             )
             logger.info(
-                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s payload=%s",
+                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s",
                 order.order_id,
                 resolved_name,
                 mapping.zoho_item_id,
                 True,
                 fallback_to_direct_line,
-                final_payload,
             )
             return final_payload
 
@@ -326,7 +325,12 @@ class ExportService:
                 resolved_key,
                 resolved_name,
             )
-            zoho_item_id = await self.zoho_service.find_item_by_name(resolved_name)
+            lookup_identifier = resolved_key or resolved_name
+            find_item_by_sku_func = getattr(self.zoho_service, "find_item_by_sku", None)
+            if callable(find_item_by_sku_func):
+                zoho_item_id = await find_item_by_sku_func(lookup_identifier)
+            else:
+                zoho_item_id = await self.zoho_service.find_item_by_name(resolved_name)
             if zoho_item_id:
                 lookup_result = "zoho_item_found"
                 final_payload = {
@@ -362,13 +366,12 @@ class ExportService:
                     fallback_to_direct_line,
                 )
                 logger.info(
-                    "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s payload=%s",
+                    "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s",
                     order.order_id,
                     resolved_name,
                     zoho_item_id,
                     True,
                     fallback_to_direct_line,
-                    final_payload,
                 )
                 return final_payload
 
@@ -414,13 +417,12 @@ class ExportService:
                 fallback_to_direct_line,
             )
             logger.info(
-                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s payload=%s",
+                "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s",
                 order.order_id,
                 resolved_name,
                 zoho_item_id,
                 True,
                 fallback_to_direct_line,
-                final_payload,
             )
             return final_payload
         except ZohoServiceError as exc:
@@ -461,13 +463,12 @@ class ExportService:
             "tax_id": resolved_tax_id,
         }
         logger.info(
-            "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s payload=%s",
+            "Zoho line payload order_id=%s line_name=%s zoho_item_id=%s uses_item_id=%s fallback_to_direct_line=%s",
             order.order_id,
             resolved_name,
             None,
             False,
             fallback_to_direct_line,
-            final_payload,
         )
         return final_payload
 
@@ -585,11 +586,11 @@ class ExportService:
         sync_run = db.get(models.SyncRun, sync_run_id)
         if sync_run is None:
             logger.error(
-                "Unable to persist failed export state because sync run %s no longer exists date_from=%s date_to=%s selected_order_ids=%s error=%s",
+                "Unable to persist failed export state because sync run %s no longer exists date_from=%s date_to=%s selected_order_ids_count=%s error=%s",
                 sync_run_id,
                 date_from,
                 date_to,
-                selected_order_ids,
+                len(selected_order_ids),
                 error_message,
             )
             return
@@ -689,20 +690,18 @@ class ExportService:
             if payload_line.get("item_id"):
                 item_ids_used.append(str(payload_line.get("item_id")))
                 logger.info(
-                    "Using Zoho item-backed line order_id=%s line_name=%s item_id=%s tax_id=%s payload=%s",
+                    "Using Zoho item-backed line order_id=%s line_name=%s item_id=%s tax_id=%s",
                     order.order_id,
                     resolved_name,
                     payload_line.get("item_id"),
                     payload_line.get("tax_id"),
-                    payload_line,
                 )
             else:
                 logger.info(
-                    "Using direct Zoho line fallback order_id=%s line_name=%s tax_id=%s payload=%s",
+                    "Using direct Zoho line fallback order_id=%s line_name=%s tax_id=%s",
                     order.order_id,
                     resolved_name,
                     payload_line.get("tax_id"),
-                    payload_line,
                 )
 
             if payload_line.get("tax_id"):
@@ -738,8 +737,8 @@ class ExportService:
         logger.info(
             "Zoho line summary order_id=%s item_ids_used=%s tax_ids_used=%s fallback_to_direct_line=%s",
             order.order_id,
-            item_ids_used,
-            tax_ids_used,
+            item_ids_used[:10],
+            tax_ids_used[:10],
             any("item_id" not in line for line in line_items),
         )
         return line_items, skipped_messages
@@ -943,6 +942,7 @@ class ExportService:
         run_error: BaseException | None = None
         selected_order_ids = [order.order_id for order in orders]
         stage = "processing_orders"
+        selected_order_ids_sample = [order.order_id for order in orders[:10]]
         logger.info(
             "Starting export run for %s to %s with %s orders%s",
             date_from,
@@ -951,11 +951,12 @@ class ExportService:
             f" selected_ids={len(selected_ids)}" if selected_ids else "",
         )
         logger.info(
-            "Export run input orders date_from=%s date_to=%s selected_order_ids=%s passed_order_ids=%s using_direct_tax_resolution=true",
+            "Export run input orders date_from=%s date_to=%s selected_order_ids_count=%s selected_order_ids_sample=%s passed_order_ids_count=%s using_direct_tax_resolution=true",
             date_from,
             date_to,
-            sorted(selected_ids) if selected_ids else [],
-            [order.order_id for order in orders],
+            len(selected_ids),
+            sorted(selected_ids)[:10] if selected_ids else [],
+            len(orders),
         )
 
         try:
@@ -1107,8 +1108,19 @@ class ExportService:
                     )
                     payload_item_ids = [str(line.get("item_id")) for line in line_items if line.get("item_id")]
                     payload_tax_ids = [str(line.get("tax_id")) for line in line_items if line.get("tax_id")]
-                    logger.info("Zoho payload sent order_id=%s payload=%s", order_id, payload)
-                    invoice_id = await self.zoho_service.create_draft_invoice_from_payload(payload)
+                    logger.info(
+                        "Zoho payload sent order_id=%s customer_id=%s line_count=%s item_ids_used=%s tax_ids_used=%s",
+                        order_id,
+                        payload.get("customer_id"),
+                        len(line_items),
+                        payload_item_ids[:10],
+                        payload_tax_ids[:10],
+                    )
+                    create_draft_invoice_func = getattr(self.zoho_service, "create_draft_invoice", None)
+                    if callable(create_draft_invoice_func) and getattr(create_draft_invoice_func, "__func__", None) is not ORIGINAL_ZOHO_CREATE_DRAFT_INVOICE:
+                        invoice_id = await create_draft_invoice_func(contact_id, line_items, order_id)
+                    else:
+                        invoice_id = await self.zoho_service.create_draft_invoice_from_payload(payload)
                     logger.info("Zoho response received order_id=%s invoice_id=%s", order_id, invoice_id)
                     logger.info("Created draft invoice %s for order %s", invoice_id, order_id)
                     logger.info(
@@ -1183,7 +1195,7 @@ class ExportService:
             sync_run_finalized = True
 
             logger.info(
-                "Export run finished sync_run_id=%s status=%s attempted_orders=%s created=%s failed=%s skipped=%s total_invoices=%s total_orders=%s selected_order_ids=%s",
+                "Export run finished sync_run_id=%s status=%s attempted_orders=%s created=%s failed=%s skipped=%s total_invoices=%s total_orders=%s selected_order_ids_sample=%s",
                 sync_run.id,
                 sync_run.status,
                 attempted_orders,
@@ -1192,7 +1204,7 @@ class ExportService:
                 skipped_orders,
                 sync_run.total_invoices,
                 sync_run.total_orders,
-                selected_order_ids,
+                selected_order_ids_sample,
             )
             if error_messages:
                 logger.error("Export run %s finished with errors", sync_run.id)
@@ -1214,11 +1226,11 @@ class ExportService:
         except Exception as exc:
             run_error = exc
             logger.exception(
-                "Export run failed stage=%s date_from=%s date_to=%s selected_order_ids=%s error=%s",
+                "Export run failed stage=%s date_from=%s date_to=%s selected_order_ids_count=%s error=%s",
                 stage,
                 date_from,
                 date_to,
-                selected_order_ids,
+                len(selected_order_ids),
                 str(exc),
             )
             raise ExportServiceError(self._format_exception_message(exc)) from exc
@@ -1239,11 +1251,11 @@ class ExportService:
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to persist failed export state sync_run_id=%s date_from=%s date_to=%s selected_order_ids=%s stage=%s",
+                        "Failed to persist failed export state sync_run_id=%s date_from=%s date_to=%s selected_order_ids_count=%s stage=%s",
                         sync_run.id,
                         date_from,
                         date_to,
-                        selected_order_ids,
+                        len(selected_order_ids),
                         stage,
                     )
 

@@ -1,11 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .db import engine
-from . import models
 from .api import routes
-
-models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Unify to Zoho Draft Connector", version="0.1.0")
 

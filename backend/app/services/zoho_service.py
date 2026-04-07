@@ -271,6 +271,9 @@ class ZohoService:
                     return str(item_id).strip()
         return None
 
+    async def find_item_by_sku(self, sku: str) -> Optional[str]:
+        return await self.find_item_by_name(sku)
+
     async def create_item(self, name: str, rate: float, tax_id: str) -> str:
         payload: Dict[str, Any] = {
             "name": name,
@@ -327,15 +330,17 @@ class ZohoService:
             )
 
         for line in line_items:
-            if not isinstance(line, dict) or not line.get("tax_id"):
+            if not isinstance(line, dict):
                 raise ZohoServiceError(
                     json.dumps(
                         {
                             "error": "Zoho API failed",
-                            "details": f"Missing tax_id for line: {line}",
+                            "details": f"Invalid line item: {line}",
                         }
                     )
                 )
+            if not line.get("tax_id"):
+                logger.info("Zoho line item missing tax_id; proceeding with request payload line=%s", line)
 
         logger.info(
             {

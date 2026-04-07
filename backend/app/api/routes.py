@@ -316,9 +316,6 @@ async def fetch_orders(request: FetchOrdersRequest, db: Session = Depends(get_db
         return JSONResponse(status_code=status_code, content=jsonable_encoder(response))
     except Exception as e:
         logger.exception("TEMP unify preview fetch failed date_from=%s date_to=%s", request.date_from, request.date_to)
-        print("=== FETCH ORDERS ERROR ===")
-        print(str(e))
-        print(traceback.format_exc())
         return JSONResponse(
             status_code=500,
             content={
@@ -420,6 +417,7 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
     date_from = _normalize_request_date(request.date_from, "date_from")
     date_to = _normalize_request_date(request.date_to, "date_to")
     logger.info("Unify export-run normalized date_from=%s date_to=%s", date_from, date_to)
+    order_ids_count = len(request.order_ids or [])
 
     settings = {s.key: s.value for s in db.query(models.Setting).all()}
     unify = UnifyService(
@@ -441,10 +439,10 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
         sync_started_at = datetime.utcnow()
         orders = await unify.fetch_orders_for_export(date_from, date_to, request.order_ids)
         logger.info(
-            "TEMP unify sync hydration success date_from=%s date_to=%s order_ids=%s order_count=%s duration_seconds=%.3f",
+            "TEMP unify sync hydration success date_from=%s date_to=%s order_ids_count=%s order_count=%s duration_seconds=%.3f",
             date_from,
             date_to,
-            request.order_ids,
+            order_ids_count,
             len(orders),
             (datetime.utcnow() - sync_started_at).total_seconds(),
         )
@@ -463,20 +461,20 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
             settings=settings,
         )
         logger.info(
-            "TEMP unify single-order sync completed date_from=%s date_to=%s order_ids=%s status=%s duration_seconds=%.3f",
+            "TEMP unify single-order sync completed date_from=%s date_to=%s order_ids_count=%s status=%s duration_seconds=%.3f",
             date_from,
             date_to,
-            request.order_ids,
+            order_ids_count,
             result.get("status"),
             (datetime.utcnow() - sync_started_at).total_seconds(),
         )
         return result
     except ExportServiceError as e:
         logger.exception(
-            "Export run failed in route date_from=%s date_to=%s order_ids=%s error=%s",
+            "Export run failed in route date_from=%s date_to=%s order_ids_count=%s error=%s",
             date_from,
             date_to,
-            request.order_ids,
+            order_ids_count,
             str(e),
         )
         return JSONResponse(
@@ -488,10 +486,10 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
         )
     except Exception as e:
         logger.exception(
-            "Unexpected export failure in route date_from=%s date_to=%s order_ids=%s",
+            "Unexpected export failure in route date_from=%s date_to=%s order_ids_count=%s",
             date_from,
             date_to,
-            request.order_ids,
+            order_ids_count,
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

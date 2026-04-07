@@ -27,11 +27,23 @@ logger.info(
     database_url_details["database"],
 )
 
-engine = create_engine(
-    normalized_database_url,
-    connect_args={"check_same_thread": False} if normalized_database_url.startswith("sqlite") else {},
-    future=True,
-)
+engine_kwargs = {
+    "future": True,
+}
+if normalized_database_url.startswith("sqlite"):
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    engine_kwargs.update(
+        {
+            "pool_pre_ping": True,
+            "pool_size": 2,
+            "max_overflow": 0,
+            "pool_recycle": 300,
+            "pool_timeout": 30,
+        }
+    )
+
+engine = create_engine(normalized_database_url, **engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()

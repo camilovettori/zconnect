@@ -18,7 +18,7 @@ from ..utils.money import normalize_unify_money
 UNIFY_ORDERS_PATH = "/v1/orders"
 UNIFY_ORDERS_PAGE_SIZE = 100
 UNIFY_ORDERS_STATUSES = ("new", "confirmed", "received", "checked")
-UNIFY_PREVIEW_ORDER_STATUSES = ("new", "confirmed", "received", "checked")
+UNIFY_PREVIEW_ORDER_STATUSES = ("confirmed", "received", "checked")
 UNIFY_ORDER_ITEMS_SUFFIX = "/items"
 UNIFY_BUYERS_PATH = "/v1/buyers"
 UNIFY_BUYER_ORGANISATION_PATH = "/v1/buyers/{buyerId}/organisation"
@@ -31,6 +31,8 @@ BUYERS_CACHE_TTL_SECONDS = 1800
 BUYER_ORGANISATION_CACHE_TTL_SECONDS = 1800
 UNIFY_ITEMS_PAGE_SIZE = 100
 UNIFY_PRODUCTS_PAGE_SIZE = 100
+DEBUG_SAMPLE_LIMIT = 10
+DEBUG_PAGE_SAMPLE_LIMIT = 5
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,21 @@ class UnifyService:
         self.client_secret = client_secret.strip()
         self.last_fetch_debug: Dict[str, Any] = {}
         self._sampled_endpoints: set[str] = set()
+
+    def _debug_sample_list(self, values: List[Any], limit: int = DEBUG_SAMPLE_LIMIT) -> List[Any]:
+        return list(values[:limit]) if isinstance(values, list) else []
+
+    def _debug_sample_page_list(self, values: List[Dict[str, Any]], limit: int = DEBUG_PAGE_SAMPLE_LIMIT) -> List[Dict[str, Any]]:
+        sampled: List[Dict[str, Any]] = []
+        for page in values[:limit]:
+            if not isinstance(page, dict):
+                continue
+            page_copy = dict(page)
+            raw_order_ids = page_copy.get("rawOrderIds")
+            if isinstance(raw_order_ids, list):
+                page_copy["rawOrderIds"] = raw_order_ids[:DEBUG_SAMPLE_LIMIT]
+            sampled.append(page_copy)
+        return sampled
 
     def _cache_key(self) -> str:
         return "|".join([self.base_url, self.client_id, self.client_secret])
@@ -1655,13 +1672,15 @@ class UnifyService:
         raw_page_count = 0
         raw_count = 0
         duplicate_raw_count = 0
-        raw_order_ids: List[str] = []
+        raw_order_id_sample: List[str] = []
         raw_page_tokens: List[Optional[str]] = []
         raw_order_ids_by_page: List[Dict[str, Any]] = []
         duplicate_raw_order_ids: List[Dict[str, Any]] = []
         dropped_orders: List[Dict[str, Any]] = []
         dropped_order_ids: set[str] = set()
         seen_order_ids: set[str] = set()
+        found_4308188 = False
+        found_4311120 = False
         statuses_used = list(UNIFY_PREVIEW_ORDER_STATUSES)
         page_size_used = UNIFY_ORDERS_PAGE_SIZE
         preview_truncated = False
@@ -1743,26 +1762,35 @@ class UnifyService:
             page_order_ids = [order_id for order_id in (self._extract_order_id(raw) for raw in page_orders) if order_id]
             raw_page_count += 1
             raw_count += len(page_orders)
-            raw_page_tokens.append(page_token)
-            raw_order_ids.extend(page_order_ids)
-            raw_order_ids_by_page.append(
-                {
-                    "pageNumber": page_number,
-                    "pageTokenSent": page_token,
-                    "requestParamsUsed": dict(params),
-                    "pageSizeReturned": len(page_orders),
-                    "nextPageTokenReturned": next_token,
-                    "rawOrderIds": page_order_ids,
-                }
-            )
+            if len(raw_page_tokens) < DEBUG_SAMPLE_LIMIT:
+                raw_page_tokens.append(page_token)
+            if len(raw_order_id_sample) < DEBUG_SAMPLE_LIMIT:
+                remaining_slots = DEBUG_SAMPLE_LIMIT - len(raw_order_id_sample)
+                raw_order_id_sample.extend(page_order_ids[:remaining_slots])
+            if "4308188" in page_order_ids:
+                found_4308188 = True
+            if "4311120" in page_order_ids:
+                found_4311120 = True
+            if len(raw_order_ids_by_page) < DEBUG_PAGE_SAMPLE_LIMIT:
+                raw_order_ids_by_page.append(
+                    {
+                        "pageNumber": page_number,
+                        "pageTokenSent": page_token,
+                        "requestParamsUsed": dict(params),
+                        "pageSizeReturned": len(page_orders),
+                        "nextPageTokenReturned": next_token,
+                        "rawOrderIds": page_order_ids[:DEBUG_SAMPLE_LIMIT],
+                    }
+                )
             logger.info(
-                "Unify raw orders page fetched page_number=%s request_params=%s pageToken=%s nextPageToken=%s page_size_returned=%s rawOrderIds=%s",
+                "Unify raw orders page fetched page_number=%s page_params=%s pageToken=%s nextPageToken=%s page_size_returned=%s raw_order_id_count=%s sample=%s",
                 page_number,
                 params,
                 page_token,
                 next_token,
                 len(page_orders),
-                page_order_ids,
+                len(page_order_ids),
+                page_order_ids[:DEBUG_SAMPLE_LIMIT],
             )
             page_first = page_orders[0] if page_orders else {}
             page_last = page_orders[-1] if page_orders else {}
@@ -1829,15 +1857,16 @@ class UnifyService:
                     duplicate_raw_count += 1
                     duplicate_raw_delivery = self._extract_raw_delivery_date_value(raw)
                     duplicate_parsed_delivery = self._parse_date_value(duplicate_raw_delivery)
-                    duplicate_raw_order_ids.append(
-                        {
-                            "id": order_id,
-                            "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
-                            "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
-                            "selectedFrom": date_from,
-                            "selectedTo": date_to,
-                        }
-                    )
+                    if len(duplicate_raw_order_ids) < DEBUG_SAMPLE_LIMIT:
+                        duplicate_raw_order_ids.append(
+                            {
+                                "id": order_id,
+                                "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
+                                "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
+                                "selectedFrom": date_from,
+                                "selectedTo": date_to,
+                            }
+                        )
                     continue
                 if order_id:
                     seen_order_ids.add(order_id)
@@ -1902,7 +1931,8 @@ class UnifyService:
             if not order_id:
                 if "<missing>" not in dropped_order_ids:
                     dropped_order_ids.add("<missing>")
-                    dropped_orders.append({"id": "<missing>", "reason": "missing_order_id"})
+                    if len(dropped_orders) < DEBUG_SAMPLE_LIMIT:
+                        dropped_orders.append({"id": "<missing>", "reason": "missing_order_id"})
                 continue
 
             raw_delivery_value = self._extract_raw_delivery_date_value(raw)
@@ -1979,8 +2009,14 @@ class UnifyService:
                 dropped_out_of_range_count += 1
 
             if in_range:
-                buyer_organisation = None
-                if buyer_id is not None:
+                buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                    raw,
+                    str(buyer_id) if buyer_id is not None else None,
+                    buyer_map,
+                    None,
+                )
+                if buyer_id is not None and (not buyer_name or not customer_name):
+                    buyer_organisation = None
                     try:
                         buyer_organisation = await self.fetch_buyer_organisation(str(buyer_id))
                     except UnifyServiceError as exc:
@@ -1990,12 +2026,13 @@ class UnifyService:
                             buyer_id,
                             exc,
                         )
-                buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
-                    raw,
-                    str(buyer_id) if buyer_id is not None else None,
-                    buyer_map,
-                    buyer_organisation,
-                )
+                    if buyer_organisation is not None:
+                        buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                            raw,
+                            str(buyer_id) if buyer_id is not None else None,
+                            buyer_map,
+                            buyer_organisation,
+                        )
                 if not customer_name:
                     customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
 
@@ -2038,17 +2075,18 @@ class UnifyService:
                     preview_reason = "Outside selected range"
                 if order_id not in dropped_order_ids:
                     dropped_order_ids.add(order_id)
-                    dropped_orders.append(
-                        {
-                            "id": order_id,
-                            "reason": preview_reason,
-                            "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
-                            "finalDeliveryDate": None if delivery_value is None else str(delivery_value),
-                            "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
-                            "selectedFrom": date_from,
-                            "selectedTo": date_to,
-                        }
-                    )
+                    if len(dropped_orders) < DEBUG_SAMPLE_LIMIT:
+                        dropped_orders.append(
+                            {
+                                "id": order_id,
+                                "reason": preview_reason,
+                                "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
+                                "finalDeliveryDate": None if delivery_value is None else str(delivery_value),
+                                "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
+                                "selectedFrom": date_from,
+                                "selectedTo": date_to,
+                            }
+                        )
 
             if order_id in target_order_traces:
                 trace = target_order_traces[order_id]
@@ -2100,9 +2138,9 @@ class UnifyService:
             "rawOrdersCount": raw_count,
             "rawPageCount": raw_page_count,
             "total_scanned_orders": raw_count,
-            "rawPageTokens": raw_page_tokens,
-            "rawOrderIds": raw_order_ids,
-            "rawOrderIdsByPage": raw_order_ids_by_page,
+            "rawPageTokens": raw_page_tokens[:DEBUG_SAMPLE_LIMIT],
+            "rawOrderIds": raw_order_id_sample,
+            "rawOrderIdsByPage": self._debug_sample_page_list(raw_order_ids_by_page),
             "statusesUsed": statuses_used,
             "pageSizeUsed": page_size_used,
             "previewTruncated": preview_truncated,
@@ -2110,9 +2148,9 @@ class UnifyService:
             "earlyStopReason": early_stop_reason,
             "orderingAssessment": ordering_assessment,
             "duplicateOrdersCount": duplicate_raw_count,
-            "duplicateRawOrderIds": duplicate_raw_order_ids,
+            "duplicateRawOrderIds": duplicate_raw_order_ids[:DEBUG_SAMPLE_LIMIT],
             "droppedOrdersCount": len(dropped_orders),
-            "droppedOrders": dropped_orders,
+            "droppedOrders": dropped_orders[:DEBUG_SAMPLE_LIMIT],
             "previewOrdersCount": preview_count,
             "preview_count": preview_count,
             "total_in_range_orders": total_in_range_orders,
@@ -2128,8 +2166,9 @@ class UnifyService:
             "totalDurationSeconds": total_duration,
             "dateFrom": date_from,
             "dateTo": date_to,
-            "includedOrderIds": [order.order_id for order in preview_orders],
+            "includedOrderIds": [order.order_id for order in preview_orders[:DEBUG_SAMPLE_LIMIT]],
         }
+        raw_orders.clear()
         return preview_orders
 
     async def fetch_orders_for_export(
@@ -2252,7 +2291,7 @@ class UnifyService:
         seen_tokens: set[str] = set()
         raw_page_count = 0
         raw_page_tokens: List[Optional[str]] = []
-        raw_order_ids: List[str] = []
+        raw_order_id_sample: List[str] = []
         raw_order_ids_by_page: List[Dict[str, Any]] = []
         statuses_used = list(UNIFY_ORDERS_STATUSES)
         page_size_used = UNIFY_ORDERS_PAGE_SIZE
@@ -2283,6 +2322,8 @@ class UnifyService:
         seen_order_ids: set[str] = set()
         duplicate_raw_order_ids: List[Dict[str, Any]] = []
         dropped_order_ids: set[str] = set()
+        found_4308188 = False
+        found_4311120 = False
 
         def _log_target_order_trace(order_id: str) -> None:
             trace = target_order_traces[order_id]
@@ -2323,17 +2364,18 @@ class UnifyService:
             if order_id in dropped_order_ids:
                 return
             dropped_order_ids.add(order_id)
-            dropped_orders.append(
-                {
-                    "id": order_id,
-                    "reason": reason,
-                    "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
-                    "finalDeliveryDate": None if final_delivery_value is None else str(final_delivery_value),
-                    "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
-                    "selectedFrom": date_from,
-                    "selectedTo": date_to,
-                }
-            )
+            if len(dropped_orders) < DEBUG_SAMPLE_LIMIT:
+                dropped_orders.append(
+                    {
+                        "id": order_id,
+                        "reason": reason,
+                        "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
+                        "finalDeliveryDate": None if final_delivery_value is None else str(final_delivery_value),
+                        "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
+                        "selectedFrom": date_from,
+                        "selectedTo": date_to,
+                    }
+                )
 
         while True:
             page_number = raw_page_count + 1
@@ -2366,26 +2408,35 @@ class UnifyService:
             page_order_ids = [order_id for order_id in (self._extract_order_id(raw) for raw in page_orders) if order_id]
             page_size_returned = len(page_orders)
             raw_page_count += 1
-            raw_page_tokens.append(page_token)
-            raw_order_ids.extend(page_order_ids)
-            raw_order_ids_by_page.append(
-                {
-                    "pageNumber": page_number,
-                    "pageTokenSent": page_token,
-                    "requestParamsUsed": dict(params),
-                    "pageSizeReturned": page_size_returned,
-                    "nextPageTokenReturned": next_token,
-                    "rawOrderIds": page_order_ids,
-                }
-            )
+            if len(raw_page_tokens) < DEBUG_SAMPLE_LIMIT:
+                raw_page_tokens.append(page_token)
+            if len(raw_order_id_sample) < DEBUG_SAMPLE_LIMIT:
+                remaining_slots = DEBUG_SAMPLE_LIMIT - len(raw_order_id_sample)
+                raw_order_id_sample.extend(page_order_ids[:remaining_slots])
+            if "4308188" in page_order_ids:
+                found_4308188 = True
+            if "4311120" in page_order_ids:
+                found_4311120 = True
+            if len(raw_order_ids_by_page) < DEBUG_PAGE_SAMPLE_LIMIT:
+                raw_order_ids_by_page.append(
+                    {
+                        "pageNumber": page_number,
+                        "pageTokenSent": page_token,
+                        "requestParamsUsed": dict(params),
+                        "pageSizeReturned": page_size_returned,
+                        "nextPageTokenReturned": next_token,
+                        "rawOrderIds": page_order_ids[:DEBUG_SAMPLE_LIMIT],
+                    }
+                )
             logger.info(
-                "Unify raw orders page fetched page_number=%s request_params=%s pageToken=%s nextPageToken=%s page_size_returned=%s rawOrderIds=%s",
+                "Unify raw orders page fetched page_number=%s page_params=%s pageToken=%s nextPageToken=%s page_size_returned=%s raw_order_id_count=%s sample=%s",
                 page_number,
                 params,
                 page_token,
                 next_token,
                 page_size_returned,
-                page_order_ids,
+                len(page_order_ids),
+                page_order_ids[:DEBUG_SAMPLE_LIMIT],
             )
             raw_count += len(page_orders)
             for raw in page_orders:
@@ -2396,15 +2447,16 @@ class UnifyService:
                     duplicate_raw_count += 1
                     duplicate_raw_delivery = self._extract_raw_delivery_date_value(raw)
                     duplicate_parsed_delivery = self._parse_date_value(duplicate_raw_delivery)
-                    duplicate_raw_order_ids.append(
-                        {
-                            "id": order_id,
-                            "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
-                            "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
-                            "selectedFrom": date_from,
-                            "selectedTo": date_to,
-                        }
-                    )
+                    if len(duplicate_raw_order_ids) < DEBUG_SAMPLE_LIMIT:
+                        duplicate_raw_order_ids.append(
+                            {
+                                "id": order_id,
+                                "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
+                                "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
+                                "selectedFrom": date_from,
+                                "selectedTo": date_to,
+                            }
+                        )
                     logger.info(
                         "Unify duplicate raw order row order_id=%s raw_delivery_date=%s parsed_delivery_date=%s selectedFrom=%s selectedTo=%s reason=%s",
                         order_id,
@@ -2433,14 +2485,12 @@ class UnifyService:
             seen_tokens.add(next_token)
             page_token = next_token
 
-        found_4308188 = "4308188" in raw_order_ids
-        found_4311120 = "4311120" in raw_order_ids
         logger.info(
-            "Unify raw orders pagination summary rawPageCount=%s rawPageTokens=%s rawOrderIds=%s rawOrderIdsByPage=%s statusesUsed=%s pageSizeUsed=%s found_4308188=%s found_4311120=%s",
+            "Unify raw orders pagination summary rawPageCount=%s rawPageTokens=%s rawOrderIdSample=%s rawOrderIdsByPageSample=%s statusesUsed=%s pageSizeUsed=%s found_4308188=%s found_4311120=%s",
             raw_page_count,
             raw_page_tokens,
-            raw_order_ids,
-            raw_order_ids_by_page,
+            raw_order_id_sample,
+            self._debug_sample_page_list(raw_order_ids_by_page),
             statuses_used,
             page_size_used,
             found_4308188,
@@ -2491,7 +2541,8 @@ class UnifyService:
             for order_id, result in zip(batch_ids, batch_results):
                 if isinstance(result, Exception):
                     detail_fetch_failed_count += 1
-                    detail_failures.append({"id": order_id, "reason": "detail_fetch_failed"})
+                    if len(detail_failures) < DEBUG_SAMPLE_LIMIT:
+                        detail_failures.append({"id": order_id, "reason": "detail_fetch_failed"})
                     logger.exception("Unify order detail fetch failed order_id=%s", order_id)
                     continue
                 detail_by_order_id[order_id] = result
@@ -2517,7 +2568,8 @@ class UnifyService:
                     dropped_record["rawDeliveryDate"] = str(raw_delivery_value)
                 if "<missing>" not in dropped_order_ids:
                     dropped_order_ids.add("<missing>")
-                    dropped_orders.append(dropped_record)
+                    if len(dropped_orders) < DEBUG_SAMPLE_LIMIT:
+                        dropped_orders.append(dropped_record)
                 continue
 
             detail = detail_by_order_id.get(order_id)
@@ -2698,8 +2750,14 @@ class UnifyService:
                 or detail.get("buyer_id")
                 or (detail.get("buyer") or {}).get("id")
             )
-            buyer_organisation = None
-            if buyer_id is not None:
+            buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                detail,
+                str(buyer_id) if buyer_id is not None else None,
+                buyer_map,
+                None,
+            )
+            if buyer_id is not None and (not buyer_name or not customer_name):
+                buyer_organisation = None
                 try:
                     buyer_organisation = await self.fetch_buyer_organisation(str(buyer_id))
                 except UnifyServiceError as exc:
@@ -2709,12 +2767,13 @@ class UnifyService:
                         buyer_id,
                         exc,
                     )
-            buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
-                detail,
-                str(buyer_id) if buyer_id is not None else None,
-                buyer_map,
-                buyer_organisation,
-            )
+                if buyer_organisation is not None:
+                    buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                        detail,
+                        str(buyer_id) if buyer_id is not None else None,
+                        buyer_map,
+                        buyer_organisation,
+                    )
             if not customer_name:
                 customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
 
@@ -2815,16 +2874,22 @@ class UnifyService:
                 total_delivery_fee=float(normalized_delivery_fee),
             )
             orders.append(order)
-            included_order_ids.append(order_id)
+            if len(included_order_ids) < DEBUG_SAMPLE_LIMIT:
+                included_order_ids.append(order_id)
             included_preview_count += 1
             orders_processed_count += 1
 
         for order_id in sorted(target_order_traces):
             _log_target_order_trace(order_id)
 
-        logger.info("Included order IDs for %s: %s", date_from, included_order_ids)
         logger.info(
-            "Unify delivery debug summary: rawOrdersCount=%s filteredOrdersCount=%s previewOrdersCount=%s droppedOrdersCount=%s detailFetchFailures=%s itemFetchAttempts=%s itemFetchFailures=%s droppedOrders=%s",
+            "Included order IDs for %s count=%s sample=%s",
+            date_from,
+            len(included_order_ids),
+            included_order_ids[:DEBUG_SAMPLE_LIMIT],
+        )
+        logger.info(
+            "Unify delivery debug summary: rawOrdersCount=%s filteredOrdersCount=%s previewOrdersCount=%s droppedOrdersCount=%s detailFetchFailures=%s itemFetchAttempts=%s itemFetchFailures=%s droppedOrdersSample=%s",
             raw_count,
             included_by_delivery,
             included_preview_count,
@@ -2832,24 +2897,24 @@ class UnifyService:
             detail_fetch_failed_count,
             item_fetch_attempts_count,
             item_fetch_failed_count,
-            [{"id": item["id"], "reason": item["reason"]} for item in dropped_orders],
+            [{"id": item["id"], "reason": item["reason"]} for item in dropped_orders[:DEBUG_SAMPLE_LIMIT]],
         )
         self.last_fetch_debug = {
             "rawOrdersCount": raw_count,
             "rawPageCount": raw_page_count,
-            "rawPageTokens": raw_page_tokens,
-            "rawOrderIds": raw_order_ids,
-            "rawOrderIdsByPage": raw_order_ids_by_page,
+            "rawPageTokens": raw_page_tokens[:DEBUG_SAMPLE_LIMIT],
+            "rawOrderIds": raw_order_id_sample,
+            "rawOrderIdsByPage": self._debug_sample_page_list(raw_order_ids_by_page),
             "statusesUsed": statuses_used,
             "pageSizeUsed": page_size_used,
             "filteredOrdersCount": included_by_delivery,
             "ordersProcessedCount": orders_processed_count,
             "previewOrdersCount": included_preview_count,
             "duplicateOrdersCount": duplicate_raw_count,
-            "duplicateRawOrderIds": duplicate_raw_order_ids,
+            "duplicateRawOrderIds": duplicate_raw_order_ids[:DEBUG_SAMPLE_LIMIT],
             "statusNotReadyCount": raw_status_not_ready_count,
             "detailFetchFailedCount": detail_fetch_failed_count,
-            "detailFetchFailures": detail_failures,
+            "detailFetchFailures": detail_failures[:DEBUG_SAMPLE_LIMIT],
             "itemFetchAttempts": item_fetch_attempts_count,
             "itemFetchFailedCount": item_fetch_failed_count,
             "itemFetchFailures": item_fetch_failed_count,
@@ -2858,12 +2923,18 @@ class UnifyService:
             "buyersFetchFailed": buyers_fetch_failed,
             "productsFetchFailed": products_fetch_failed,
             "droppedOrdersCount": len(dropped_orders),
-            "droppedOrders": dropped_orders,
-            "includedOrderIds": included_order_ids,
+            "droppedOrders": dropped_orders[:DEBUG_SAMPLE_LIMIT],
+            "includedOrderIds": included_order_ids[:DEBUG_SAMPLE_LIMIT],
             "dateFrom": date_from,
             "dateTo": date_to,
         }
-        logger.info("Unify delivery dropped orders detailed: %s", dropped_orders)
+        raw_orders.clear()
+        detail_by_order_id.clear()
+        logger.info(
+            "Unify delivery dropped orders sample count=%s sample=%s",
+            len(dropped_orders),
+            [{"id": item["id"], "reason": item["reason"]} for item in dropped_orders[:DEBUG_SAMPLE_LIMIT]],
+        )
         logger.info("Unify fetched %s delivery-date orders with details for %s to %s", len(orders), date_from, date_to)
         return orders
 
