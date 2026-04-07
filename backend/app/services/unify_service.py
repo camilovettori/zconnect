@@ -2000,14 +2000,33 @@ class UnifyService:
                             buyer_id,
                             exc,
                         )
+                name_source = raw
+                if buyer_name is None and customer_name is None:
+                    try:
+                        name_source = await self.fetch_order_detail(order_id)
+                    except UnifyServiceError as exc:
+                        logger.warning(
+                            "Unify preview customer-name detail fetch failed order_id=%s buyer_id=%s: %s",
+                            order_id,
+                            buyer_id,
+                            exc,
+                        )
+                        name_source = raw
                 buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
-                    raw,
+                    name_source,
                     str(buyer_id) if buyer_id is not None else None,
                     buyer_map,
                     buyer_organisation,
                 )
                 if not customer_name:
                     customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
+                logger.info(
+                    "Unify preview customer resolution order_id=%s buyer_id=%s buyer_name=%s customer_name=%s",
+                    order_id,
+                    buyer_id,
+                    buyer_name,
+                    customer_name,
+                )
 
             if preview_status == "ready":
                 preview_status_counts["ready"] += 1
