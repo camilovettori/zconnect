@@ -58,6 +58,7 @@ class OrderLine(BaseModel):
 class UnifyOrderPreview(BaseModel):
     order_id: str
     customer_name: str
+    customer_id: Optional[str] = None
     buyer_name: Optional[str] = None
     buyer_id: Optional[str] = None
     delivery_address: Optional[str] = None
@@ -72,6 +73,7 @@ class UnifyOrderPreview(BaseModel):
 class UnifyOrder(BaseModel):
     order_id: str
     customer_name: str
+    customer_id: Optional[str] = None
     buyer_name: Optional[str] = None
     order_date: str
     delivery_date: str = ""

@@ -260,10 +260,40 @@ async def fetch_orders(request: FetchOrdersRequest, db: Session = Depends(get_db
             for row in db.query(models.ExportedOrder.unify_order_id).all()
         }
 
+        def resolve_customer_display_name(order: UnifyOrder) -> str:
+            candidates = [
+                order.customer_name,
+                order.buyer_name,
+                f"Customer {order.customer_id}" if order.customer_id else None,
+                f"Customer {order.buyer_id}" if order.buyer_id else None,
+            ]
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                text = candidate.strip()
+                if not text or not any(char.isalpha() for char in text):
+                    continue
+                lowered = text.lower()
+                if lowered.startswith("customer "):
+                    suffix = lowered[len("customer ") :].strip()
+                    if suffix.isdigit():
+                        continue
+                if lowered.startswith("buyer "):
+                    suffix = lowered[len("buyer ") :].strip()
+                    if suffix.isdigit():
+                        continue
+                return text
+            if order.customer_id:
+                return f"Customer {order.customer_id}"
+            if order.buyer_id:
+                return f"Customer {order.buyer_id}"
+            return "Customer"
+
         customer_info = {}
         for order in orders:
             order.already_exported = order.order_id in exported_order_ids
-            info = customer_info.setdefault(order.customer_name, {"order_count": 0, "total": 0.0})
+            customer_label = resolve_customer_display_name(order)
+            info = customer_info.setdefault(customer_label, {"order_count": 0, "total": 0.0})
             info["order_count"] += 1
             info["total"] += order.total
 

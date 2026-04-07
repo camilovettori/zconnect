@@ -11,6 +11,7 @@ type OrderLine = { item_sku: string; item_name: string; quantity: number; price:
 type UnifyOrderPreview = {
   order_id: string;
   customer_name: string;
+  customer_id?: string | null;
   buyer_name?: string | null;
   buyer_id?: string | null;
   delivery_address?: string | null;
@@ -422,23 +423,38 @@ export default function SyncPage() {
       return false;
     }
     const trimmed = value.trim();
+    if (!trimmed || /^\d+$/.test(trimmed)) {
+      return false;
+    }
+    const lowered = trimmed.toLowerCase();
+    if (/^(customer|buyer)\s+\d+$/.test(lowered)) {
+      return false;
+    }
     return trimmed.length > 0 && /[A-Za-z]/.test(trimmed);
   };
 
   const resolveCustomerDisplayName = (order: UnifyOrderPreview) =>
     [
+      order.customer_name,
+      order.buyer_name,
+      order.customer_id ? `Customer ${order.customer_id}` : null,
+      order.buyer_id ? `Customer ${order.buyer_id}` : null,
+    ].find((candidate) => isMeaningfulCustomerLabel(candidate)) || (order.customer_id ? `Customer ${order.customer_id}` : order.buyer_id ? `Customer ${order.buyer_id}` : "Customer");
+
+  const resolveBuyerDisplayName = (order: UnifyOrderPreview) =>
+    [
       order.buyer_name,
       order.customer_name,
       order.buyer_id ? `Customer ${order.buyer_id}` : null,
-      `Customer ${order.order_id}`,
-    ].find((candidate) => isMeaningfulCustomerLabel(candidate)) || `Customer ${order.order_id}`;
+      order.customer_id ? `Customer ${order.customer_id}` : null,
+    ].find((candidate) => isMeaningfulCustomerLabel(candidate)) || (order.buyer_id ? `Customer ${order.buyer_id}` : order.customer_id ? `Customer ${order.customer_id}` : "Customer");
 
-  const getBuyerDisplayName = (order: UnifyOrderPreview) => resolveCustomerDisplayName(order);
+  const getBuyerDisplayName = (order: UnifyOrderPreview) => resolveBuyerDisplayName(order);
   const getCustomerDisplayName = (order: UnifyOrderPreview) => resolveCustomerDisplayName(order);
   const getDeliveryLabel = (order: UnifyOrderPreview | UnifyOrderDetail) => order.delivery_date || order.order_date || "";
   const getSyncSummary = (orderIds: string[]) => {
     const selectedOrders = orders.filter((order) => orderIds.includes(order.order_id));
-    const selectedCustomers = new Set(selectedOrders.map((order) => getBuyerDisplayName(order)));
+    const selectedCustomers = new Set(selectedOrders.map((order) => getCustomerDisplayName(order)));
     const total = selectedOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
 
     return {
@@ -606,7 +622,7 @@ export default function SyncPage() {
       });
       setFetchSummary(data.debug_summary ?? null);
       const uniqueCustomers = responseOrders.reduce((acc: Record<string, CustomerSummary>, order: UnifyOrderPreview) => {
-        const key = getBuyerDisplayName(order);
+        const key = getCustomerDisplayName(order);
         if (!acc[key]) {
           acc[key] = { order_count: 0, total: 0 };
         }
@@ -876,7 +892,7 @@ export default function SyncPage() {
                             </div>
                             <p className="mt-3 text-xs font-medium uppercase tracking-[0.24em] text-slate-500">Order</p>
                             <h4 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">{order.order_id}</h4>
-                            <p className="mt-1 text-sm font-medium text-slate-700">Customer: {getBuyerDisplayName(order)}</p>
+                            <p className="mt-1 text-sm font-medium text-slate-700">Customer: {getCustomerDisplayName(order)}</p>
                             {order.customer_name && getCustomerDisplayName(order) !== getBuyerDisplayName(order) && (
                               <p className="mt-1 text-xs font-light text-slate-400">Recipient: {getCustomerDisplayName(order)}</p>
                             )}

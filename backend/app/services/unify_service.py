@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime
@@ -666,7 +667,35 @@ class UnifyService:
         text = self._clean_text(value)
         if not text:
             return False
+        lowered = text.lower()
+        if lowered.isdigit():
+            return False
+        if re.fullmatch(r"(customer|buyer)\s+\d+", lowered):
+            return False
         return any(char.isalpha() for char in text)
+
+    def _extract_customer_identifier(self, raw: Dict[str, Any], buyer_id: Optional[str] = None) -> Optional[str]:
+        buyer = raw.get("buyer") if isinstance(raw.get("buyer"), dict) else {}
+        customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
+        candidates = [
+            raw.get("customerId"),
+            raw.get("customer_id"),
+            raw.get("customerID"),
+            raw.get("externalCustomerId"),
+            raw.get("external_customer_id"),
+            customer.get("id"),
+            customer.get("customerId"),
+            customer.get("customer_id"),
+            buyer.get("customerId"),
+            buyer.get("customer_id"),
+            buyer.get("id"),
+            buyer_id,
+        ]
+        for candidate in candidates:
+            text = self._clean_text(candidate)
+            if text:
+                return text
+        return None
 
     def _first_meaningful_customer_label(self, *candidates: Any) -> Optional[str]:
         for candidate in candidates:
@@ -705,6 +734,7 @@ class UnifyService:
 
     def _extract_readable_buyer_name(self, payload: Dict[str, Any]) -> Optional[str]:
         buyer = payload.get("buyer") if isinstance(payload.get("buyer"), dict) else {}
+        customer = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
         first_name = self._clean_text(payload.get("firstName") or payload.get("first_name") or buyer.get("firstName") or buyer.get("first_name"))
         last_name = self._clean_text(payload.get("lastName") or payload.get("last_name") or buyer.get("lastName") or buyer.get("last_name"))
         contact_full_name = " ".join(part for part in [first_name, last_name] if part).strip() or None
@@ -757,6 +787,28 @@ class UnifyService:
             buyer.get("additional_buyer_field2"),
             buyer.get("contactName"),
             buyer.get("contact_name"),
+            customer.get("name"),
+            customer.get("displayName"),
+            customer.get("display_name"),
+            customer.get("companyName"),
+            customer.get("company_name"),
+            customer.get("businessName"),
+            customer.get("business_name"),
+            customer.get("organizationName"),
+            customer.get("organization_name"),
+            customer.get("fullName"),
+            customer.get("full_name"),
+            " ".join(part for part in [self._clean_text(customer.get("firstName") or customer.get("first_name")), self._clean_text(customer.get("lastName") or customer.get("last_name"))] if part).strip() or None,
+            customer.get("buyerDisplayName"),
+            customer.get("buyer_display_name"),
+            customer.get("customerDisplayName"),
+            customer.get("customer_display_name"),
+            customer.get("buyerName"),
+            customer.get("buyer_name"),
+            customer.get("customerName"),
+            customer.get("customer_name"),
+            customer.get("contactName"),
+            customer.get("contact_name"),
         ]
 
         for candidate in candidates:
@@ -877,6 +929,7 @@ class UnifyService:
         include_address_fallback: bool = True,
     ) -> Optional[str]:
         buyer = raw.get("buyer") if isinstance(raw.get("buyer"), dict) else {}
+        customer = raw.get("customer") if isinstance(raw.get("customer"), dict) else {}
         buyer_key = str(buyer_id).strip() if buyer_id is not None and str(buyer_id).strip() else ""
 
         candidates = [
@@ -899,6 +952,15 @@ class UnifyService:
             buyer.get("additional_buyer_field1"),
             buyer.get("additionalBuyerField2"),
             buyer.get("additional_buyer_field2"),
+            customer.get("name"),
+            customer.get("displayName"),
+            customer.get("display_name"),
+            customer.get("companyName"),
+            customer.get("company_name"),
+            customer.get("additionalBuyerField1"),
+            customer.get("additional_buyer_field1"),
+            customer.get("additionalBuyerField2"),
+            customer.get("additional_buyer_field2"),
         ]
         if include_address_fallback:
             candidates.append(self._extract_delivery_address_text(raw.get("deliveryAddress") or raw.get("delivery_address") or {}))
@@ -1493,6 +1555,7 @@ class UnifyService:
         *,
         order_id: str,
         customer_name: str,
+        customer_id: Optional[str],
         buyer_name: Optional[str],
         buyer_id: Optional[str],
         delivery_address: Optional[str],
@@ -1505,6 +1568,7 @@ class UnifyService:
         return UnifyOrderPreview(
             order_id=order_id,
             customer_name=customer_name,
+            customer_id=customer_id,
             buyer_name=buyer_name,
             buyer_id=buyer_id,
             delivery_address=delivery_address,
@@ -1544,13 +1608,22 @@ class UnifyService:
                 buyer_organisation = await self.fetch_buyer_organisation(str(buyer_id))
             except UnifyServiceError as exc:
                 logger.warning("Unify buyer organisation fetch failed for order_id=%s buyer_id=%s: %s", order.order_id, buyer_id, exc)
+        customer_identifier = self._extract_customer_identifier(detail, str(buyer_id) if buyer_id is not None else None)
         buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
             detail,
             str(buyer_id) if buyer_id is not None else None,
             buyer_name_map,
             buyer_organisation,
         )
-        customer_name = customer_name or order.customer_name or buyer_name or f"Customer {buyer_id}" or order.order_id
+        customer_name = (
+            customer_name
+            or order.customer_name
+            or buyer_name
+            or (f"Customer {order.customer_id}" if getattr(order, "customer_id", None) else None)
+            or (f"Customer {customer_identifier}" if customer_identifier else None)
+            or (f"Customer {buyer_id}" if buyer_id is not None else None)
+            or "Customer"
+        )
 
         preview_reason = (order.preview_reason or "").strip()
         preview_status = (order.preview_status or "ready").strip().lower() or "ready"
@@ -1635,6 +1708,7 @@ class UnifyService:
         return UnifyOrder(
             order_id=order.order_id,
             customer_name=str(customer_name),
+            customer_id=customer_identifier or order.customer_id,
             buyer_name=str(buyer_name) if buyer_name else None,
             order_date=str(order_date_value or delivery_date_value or order.delivery_date or ""),
             delivery_date=str(delivery_date_value or order.delivery_date or ""),
@@ -2034,7 +2108,9 @@ class UnifyService:
                             buyer_organisation,
                         )
                 if not customer_name:
-                    customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
+                    customer_identifier = self._extract_customer_identifier(raw, str(buyer_id) if buyer_id is not None else None)
+                    fallback_id = customer_identifier or (str(buyer_id).strip() if buyer_id is not None and str(buyer_id).strip() else None)
+                    customer_name = f"Customer {fallback_id}" if fallback_id else "Customer"
 
             if preview_status == "ready":
                 preview_status_counts["ready"] += 1
@@ -2042,6 +2118,7 @@ class UnifyService:
                     self._build_preview_order(
                         order_id=order_id,
                         customer_name=str(customer_name),
+                        customer_id=self._extract_customer_identifier(raw, str(buyer_id) if buyer_id is not None else None),
                         buyer_name=str(buyer_name) if buyer_name else None,
                         buyer_id=str(buyer_id) if buyer_id is not None else None,
                         delivery_address=str(delivery_address) if delivery_address else None,
@@ -2060,6 +2137,7 @@ class UnifyService:
                     self._build_preview_order(
                         order_id=order_id,
                         customer_name=str(customer_name),
+                        customer_id=self._extract_customer_identifier(raw, str(buyer_id) if buyer_id is not None else None),
                         buyer_name=str(buyer_name) if buyer_name else None,
                         buyer_id=str(buyer_id) if buyer_id is not None else None,
                         delivery_address=str(delivery_address) if delivery_address else None,
@@ -2197,7 +2275,8 @@ class UnifyService:
                     hydrated.append(
                         UnifyOrder(
                             order_id=order_id,
-                            customer_name=order_id,
+                            customer_name="Customer",
+                            customer_id=None,
                             buyer_name=None,
                             order_date=date_from,
                             delivery_date=date_from,
@@ -2233,6 +2312,7 @@ class UnifyService:
                     UnifyOrder(
                         order_id=order.order_id,
                         customer_name=order.customer_name,
+                        customer_id=order.customer_id,
                         buyer_name=order.buyer_name,
                         order_date=order.delivery_date or date_from,
                         delivery_date=order.delivery_date or date_from,
@@ -2260,7 +2340,8 @@ class UnifyService:
     ) -> UnifyOrder:
         preview = self._build_preview_order(
             order_id=order_id,
-            customer_name=order_id,
+            customer_name="Customer",
+            customer_id=None,
             buyer_name=None,
             buyer_id=None,
             delivery_address=None,
@@ -2499,7 +2580,11 @@ class UnifyService:
 
         products_fetch_failed = False
         buyer_map: Dict[str, str] = {}
-        logger.info("Unify buyers list fetch skipped for fetch_orders; buyer organisation lookup is used for display names")
+        try:
+            buyer_map = await self.fetch_buyers()
+            logger.info("Unify buyers fetched for fetch_orders buyer_count=%s", len(buyer_map))
+        except UnifyServiceError as exc:
+            logger.warning("Unify buyers lookup failed for fetch_orders; continuing without buyer name mapping: %s", exc)
 
         product_result = await asyncio.gather(
             self.fetch_products(),
@@ -2767,15 +2852,17 @@ class UnifyService:
                         buyer_id,
                         exc,
                     )
-                if buyer_organisation is not None:
-                    buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
-                        detail,
-                        str(buyer_id) if buyer_id is not None else None,
-                        buyer_map,
-                        buyer_organisation,
-                    )
+            if buyer_organisation is not None:
+                buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                    detail,
+                    str(buyer_id) if buyer_id is not None else None,
+                    buyer_map,
+                    buyer_organisation,
+                )
             if not customer_name:
-                customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
+                customer_identifier = self._extract_customer_identifier(detail, str(buyer_id) if buyer_id is not None else None)
+                fallback_id = customer_identifier or (str(buyer_id).strip() if buyer_id is not None and str(buyer_id).strip() else None)
+                customer_name = f"Customer {fallback_id}" if fallback_id else "Customer"
 
             rows = []
             first_valid_item: Optional[Dict[str, Any]] = None
@@ -2859,6 +2946,7 @@ class UnifyService:
             order = UnifyOrder(
                 order_id=order_id,
                 customer_name=str(customer_name),
+                customer_id=self._extract_customer_identifier(detail, str(buyer_id) if buyer_id is not None else None),
                 buyer_name=str(buyer_name) if buyer_name else None,
                 order_date=str(order_date_value),
                 delivery_date=str(detail_delivery_value or detail.get("order_date") or detail.get("orderDate") or date_from),
