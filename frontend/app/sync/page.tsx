@@ -675,6 +675,24 @@ export default function SyncPage() {
         durationMs: performance.now() - requestStartedAt,
       });
       setExportResult(data);
+      const syncedOrderIds = new Set(
+        (data.details ?? [])
+          .filter((detail) => detail.status === "created" || detail.status === "skipped")
+          .map((detail) => detail.order_id),
+      );
+      if (syncedOrderIds.size === 0 && orderIds.length === 1) {
+        syncedOrderIds.add(orderIds[0]);
+      }
+      if (syncedOrderIds.size > 0) {
+        setOrders((currentOrders) =>
+          currentOrders.map((order) => (syncedOrderIds.has(order.order_id) ? { ...order, already_exported: true } : order)),
+        );
+        setSelectedOrderIds((currentSelected) => {
+          const next = new Set(currentSelected);
+          syncedOrderIds.forEach((orderId) => next.delete(orderId));
+          return next;
+        });
+      }
       setMessage(formatSyncResultMessage(data));
     } catch (error) {
       console.error("[Sync] Export request failed", {
