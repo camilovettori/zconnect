@@ -16,6 +16,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { user, loading } = useAppSession();
 
+  const firstName = user?.user_metadata?.first_name?.trim() || "";
+  const lastName = user?.user_metadata?.last_name?.trim() || "";
+  const displayName = firstName ? `Hi, ${[firstName, lastName].filter(Boolean).join(" ")}` : user?.email || "Signed in";
+
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
@@ -55,7 +59,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-3">
               <div className="hidden text-right sm:block">
                 <div className="text-sm font-medium text-slate-700">
-                  {loading ? "Loading session..." : user?.email || "Signed in"}
+                  {loading ? "Loading session..." : displayName}
                 </div>
                 <div className="text-xs text-slate-500">
                   {loading ? "..." : user?.role ? user.role.toUpperCase() : "SIGNED IN"}

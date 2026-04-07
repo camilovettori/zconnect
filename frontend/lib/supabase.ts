@@ -130,7 +130,7 @@ export async function listAuthUsers(page = 1, perPage = 100) {
   return { users };
 }
 
-export async function createAuthUser(input: { email: string; password: string; role: string }) {
+export async function createAuthUser(input: { email: string; password: string; role: string; first_name?: string; last_name?: string }) {
   const response = await fetch(authUrl("/auth/v1/admin/users"), {
     method: "POST",
     headers: authHeaders("service_role", {
@@ -141,6 +141,10 @@ export async function createAuthUser(input: { email: string; password: string; r
       password: input.password,
       email_confirm: true,
       app_metadata: { role: input.role },
+      user_metadata: {
+        first_name: input.first_name || "",
+        last_name: input.last_name || "",
+      },
     }),
   });
 

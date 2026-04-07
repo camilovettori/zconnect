@@ -7,6 +7,10 @@ type SessionUser = {
   id: string;
   email: string;
   role: string;
+  user_metadata?: {
+    first_name?: string;
+    last_name?: string;
+  };
 };
 
 type SessionState = {
@@ -32,6 +36,7 @@ async function loadSession() {
       id: String((user as { id?: unknown }).id || ""),
       email: String((user as { email?: unknown }).email || ""),
       role: String((user as { role?: unknown }).role || "user"),
+      user_metadata: (user as { user_metadata?: { first_name?: string; last_name?: string } }).user_metadata || {},
     } satisfies SessionUser;
   } catch {
     return null;

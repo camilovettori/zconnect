@@ -10,6 +10,8 @@ type UserRow = {
   email: string;
   role: string;
   created_at: string | null;
+  first_name?: string;
+  last_name?: string;
 };
 
 function Modal({
@@ -56,6 +58,8 @@ export default function UsersPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("user");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [saving, setSaving] = useState(false);
 
   const isAdmin = user?.role === "admin";
@@ -72,11 +76,13 @@ export default function UsersPage() {
       const nextUsers = Array.isArray(payload?.users)
         ? payload.users
             .filter((user: Partial<UserRow> | null | undefined) => Boolean(user && user.id))
-            .map((user: Partial<UserRow>) => ({
+              .map((user: Partial<UserRow>) => ({
               id: String(user.id || ""),
               email: String(user.email || ""),
               role: String(user.role || "user"),
               created_at: user.created_at ? String(user.created_at) : null,
+              first_name: String(user.first_name || ""),
+              last_name: String(user.last_name || ""),
             }))
         : [];
       setUsers(nextUsers);
@@ -108,7 +114,7 @@ export default function UsersPage() {
       const response = await fetch("/api/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, role }),
+        body: JSON.stringify({ email, password, role, first_name: firstName, last_name: lastName }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -120,6 +126,8 @@ export default function UsersPage() {
       setEmail("");
       setPassword("");
       setRole("user");
+      setFirstName("");
+      setLastName("");
       setSuccess(createdEmail ? `User ${createdEmail} created successfully` : "User created successfully");
       await loadUsers();
     } catch (err) {
@@ -233,6 +241,24 @@ export default function UsersPage() {
                 type="email"
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-700">First Name</span>
+              <input
+                type="text"
+                value={firstName}
+                onChange={(event) => setFirstName(event.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-slate-700">Last Name</span>
+              <input
+                type="text"
+                value={lastName}
+                onChange={(event) => setLastName(event.target.value)}
                 className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
               />
             </label>

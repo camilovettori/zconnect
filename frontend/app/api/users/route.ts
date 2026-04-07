@@ -38,6 +38,8 @@ export async function GET() {
           email: user.email || "",
           role: String(user.app_metadata?.role || "user"),
           created_at: user.created_at ?? null,
+          first_name: String(user.user_metadata?.first_name || ""),
+          last_name: String(user.user_metadata?.last_name || ""),
         })),
     });
   } catch (error) {
@@ -55,13 +57,15 @@ export async function POST(request: Request) {
   const email = String(body?.email || "").trim();
   const password = String(body?.password || "");
   const role = String(body?.role || "user").trim() || "user";
+  const first_name = String(body?.first_name || "").trim();
+  const last_name = String(body?.last_name || "").trim();
 
   if (!email || !password) {
     return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
   }
 
   try {
-    const payload = await createAuthUser({ email, password, role });
+    const payload = await createAuthUser({ email, password, role, first_name, last_name });
     const createdUser = payload?.user;
     if (!createdUser?.id) {
       return NextResponse.json(
@@ -75,6 +79,8 @@ export async function POST(request: Request) {
         id: createdUser.id,
         email: createdUser.email || email,
         role: String(createdUser.app_metadata?.role || role),
+        first_name: String(createdUser.user_metadata?.first_name || first_name || ""),
+        last_name: String(createdUser.user_metadata?.last_name || last_name || ""),
       },
     });
   } catch (error) {

@@ -3,9 +3,11 @@
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useAppSession } from "../../components/app-session";
 
 export default function LoginPage() {
   const router = useRouter();
+  const { refresh } = useAppSession();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -45,6 +47,7 @@ export default function LoginPage() {
         window.localStorage.removeItem("zconnect:remembered-email");
       }
 
+      await refresh();
       router.replace("/sync");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
