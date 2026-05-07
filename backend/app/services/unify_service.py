@@ -31,6 +31,9 @@ BUYERS_CACHE_TTL_SECONDS = 1800
 BUYER_ORGANISATION_CACHE_TTL_SECONDS = 1800
 UNIFY_ITEMS_PAGE_SIZE = 100
 UNIFY_PRODUCTS_PAGE_SIZE = 100
+PREVIEW_MAX_ORDERS = 200
+PREVIEW_MAX_DROPPED_DETAILS = 50
+PREVIEW_MAX_DUPLICATE_DETAILS = 20
 
 logger = logging.getLogger(__name__)
 
@@ -1659,15 +1662,11 @@ class UnifyService:
         )
         self.last_fetch_debug = {}
 
-        raw_orders: List[Dict[str, Any]] = []
         page_token: Optional[str] = None
         seen_tokens: set[str] = set()
         raw_page_count = 0
         raw_count = 0
         duplicate_raw_count = 0
-        raw_order_ids: List[str] = []
-        raw_page_tokens: List[Optional[str]] = []
-        raw_order_ids_by_page: List[Dict[str, Any]] = []
         duplicate_raw_order_ids: List[Dict[str, Any]] = []
         dropped_orders: List[Dict[str, Any]] = []
         dropped_order_ids: set[str] = set()
@@ -1690,20 +1689,14 @@ class UnifyService:
         delivery_date_descending = True
         previous_page_last_create_time: Optional[datetime] = None
         previous_page_last_delivery_date: Optional[date_cls] = None
-        target_order_ids = {"4308188", "4311120"}
-        target_order_traces: Dict[str, Dict[str, Any]] = {
-            order_id: {
-                "raw_found": False,
-                "raw_found_page": None,
-                "detail_fetch_attempted": False,
-                "detail_fetch_succeeded": False,
-                "detail_delivery_date": None,
-                "passed_filter": False,
-                "dropped_reason": None,
-                "included_in_preview": False,
-            }
-            for order_id in target_order_ids
-        }
+        preview_orders: List[UnifyOrderPreview] = []
+        preview_status_counts = {"ready": 0, "blocked_in_range": 0}
+        dropped_out_of_range_count = 0
+        total_in_range_orders = 0
+        detail_fallback_attempts = 0
+        detail_fallback_failures = 0
+        detail_fallback_duration = 0.0
+        buyer_map: Optional[Dict[str, str]] = None
 
         start_at = time.perf_counter()
         max_fetch_duration = 80
@@ -1753,18 +1746,6 @@ class UnifyService:
             page_order_ids = [order_id for order_id in (self._extract_order_id(raw) for raw in page_orders) if order_id]
             raw_page_count += 1
             raw_count += len(page_orders)
-            raw_page_tokens.append(page_token)
-            raw_order_ids.extend(page_order_ids)
-            raw_order_ids_by_page.append(
-                {
-                    "pageNumber": page_number,
-                    "pageTokenSent": page_token,
-                    "requestParamsUsed": dict(params),
-                    "pageSizeReturned": len(page_orders),
-                    "nextPageTokenReturned": next_token,
-                    "rawOrderIds": page_order_ids,
-                }
-            )
             logger.info(
                 "Unify raw orders page fetched page_number=%s request_params=%s pageToken=%s nextPageToken=%s page_size_returned=%s rawOrderIds=%s",
                 page_number,
@@ -1831,27 +1812,187 @@ class UnifyService:
 
             for raw in page_orders:
                 order_id = self._extract_order_id(raw)
-                if order_id in target_order_traces:
-                    trace = target_order_traces[order_id]
-                    trace["raw_found"] = True
-                    trace["raw_found_page"] = page_number
                 if order_id and order_id in seen_order_ids:
                     duplicate_raw_count += 1
-                    duplicate_raw_delivery = self._extract_raw_delivery_date_value(raw)
-                    duplicate_parsed_delivery = self._parse_date_value(duplicate_raw_delivery)
-                    duplicate_raw_order_ids.append(
-                        {
-                            "id": order_id,
-                            "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
-                            "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
-                            "selectedFrom": date_from,
-                            "selectedTo": date_to,
-                        }
-                    )
+                    if len(duplicate_raw_order_ids) < PREVIEW_MAX_DUPLICATE_DETAILS:
+                        duplicate_raw_delivery = self._extract_raw_delivery_date_value(raw)
+                        duplicate_parsed_delivery = self._parse_date_value(duplicate_raw_delivery)
+                        duplicate_raw_order_ids.append(
+                            {
+                                "id": order_id,
+                                "rawDeliveryDate": None if duplicate_raw_delivery is None else str(duplicate_raw_delivery),
+                                "parsedDeliveryDate": duplicate_parsed_delivery.isoformat() if duplicate_parsed_delivery else None,
+                                "selectedFrom": date_from,
+                                "selectedTo": date_to,
+                            }
+                        )
                     continue
                 if order_id:
                     seen_order_ids.add(order_id)
-                raw_orders.append(raw)
+                if not order_id:
+                    if "<missing>" not in dropped_order_ids:
+                        dropped_order_ids.add("<missing>")
+                        dropped_orders.append({"id": "<missing>", "reason": "missing_order_id"})
+                    continue
+
+                raw_delivery_value = self._extract_raw_delivery_date_value(raw)
+                delivery_value = raw_delivery_value
+                parsed_delivery_date = self._parse_date_value(delivery_value) if delivery_value else None
+                detail_fallback_used = False
+                if not parsed_delivery_date:
+                    detail_fallback_attempts += 1
+                    detail_started_at = time.perf_counter()
+                    try:
+                        delivery_value, parsed_delivery_date_str, detail_fallback_used = await self._resolve_delivery_date_for_preview(
+                            raw,
+                            order_id,
+                            allow_detail_fallback=True,
+                        )
+                        if parsed_delivery_date_str:
+                            parsed_delivery_date = self._parse_date_value(parsed_delivery_date_str)
+                        if detail_fallback_used:
+                            delivery_value = delivery_value or parsed_delivery_date_str
+                    except UnifyServiceError as exc:
+                        detail_fallback_failures += 1
+                        logger.warning("Unify deliveryDate fallback failed for order_id=%s: %s", order_id, exc)
+                        delivery_value = raw_delivery_value
+                        parsed_delivery_date = self._parse_date_value(delivery_value) if delivery_value else None
+                        if not delivery_value:
+                            delivery_value = None
+                    finally:
+                        detail_fallback_duration += time.perf_counter() - detail_started_at
+
+                raw_status = self._extract_status(raw) or "confirmed"
+                buyer_id = raw.get("buyerId") or raw.get("buyer_id") or (raw.get("buyer") or {}).get("id")
+                buyer_name = None
+                customer_name = None
+                delivery_address = None
+                total = self._to_major_currency(raw.get("totalNetAmount") or raw.get("total_net_amount"))
+
+                preview_status = "ready"
+                preview_reason = ""
+                if not delivery_value:
+                    preview_status = "blocked"
+                    preview_reason = "Missing delivery date in raw preview"
+                elif not parsed_delivery_date:
+                    preview_status = "blocked"
+                    preview_reason = "Unparseable delivery date"
+                elif not parsed_start_date or not parsed_end_date:
+                    preview_status = "blocked"
+                    preview_reason = "Invalid selected date range"
+                elif not (parsed_start_date <= parsed_delivery_date <= parsed_end_date):
+                    preview_status = "blocked"
+                    preview_reason = "Outside selected range"
+                elif raw_status and not self._is_preview_ready_status(raw_status):
+                    preview_status = "blocked"
+                    preview_reason = f"Order status {raw_status}"
+
+                in_range = bool(
+                    parsed_delivery_date
+                    and parsed_start_date
+                    and parsed_end_date
+                    and parsed_start_date <= parsed_delivery_date <= parsed_end_date
+                )
+                if in_range:
+                    total_in_range_orders += 1
+                else:
+                    dropped_out_of_range_count += 1
+
+                if in_range:
+                    buyer_organisation = None
+                    if buyer_id is not None:
+                        try:
+                            buyer_organisation = await self.fetch_buyer_organisation(str(buyer_id))
+                        except UnifyServiceError as exc:
+                            logger.warning(
+                                "Unify buyer organisation fetch failed during preview name resolution order_id=%s buyer_id=%s: %s",
+                                order_id,
+                                buyer_id,
+                                exc,
+                            )
+                    name_source = raw
+                    if buyer_name is None and customer_name is None:
+                        try:
+                            name_source = await self.fetch_order_detail(order_id)
+                        except UnifyServiceError as exc:
+                            logger.warning(
+                                "Unify preview customer-name detail fetch failed order_id=%s buyer_id=%s: %s",
+                                order_id,
+                                buyer_id,
+                                exc,
+                            )
+                            name_source = raw
+                    buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
+                        name_source,
+                        str(buyer_id) if buyer_id is not None else None,
+                        buyer_map,
+                        buyer_organisation,
+                    )
+                    if not customer_name:
+                        customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
+                    logger.info(
+                        "Unify preview customer resolution order_id=%s buyer_id=%s buyer_name=%s customer_name=%s",
+                        order_id,
+                        buyer_id,
+                        buyer_name,
+                        customer_name,
+                    )
+
+                if len(preview_orders) >= PREVIEW_MAX_ORDERS:
+                    preview_truncated = True
+                    preview_truncation_reason = "max_preview_orders_reached"
+                    continue
+
+                if preview_status == "ready":
+                    preview_status_counts["ready"] += 1
+                    preview_orders.append(
+                        self._build_preview_order(
+                            order_id=order_id,
+                            customer_name=str(customer_name),
+                            buyer_name=str(buyer_name) if buyer_name else None,
+                            buyer_id=str(buyer_id) if buyer_id is not None else None,
+                            delivery_address=str(delivery_address) if delivery_address else None,
+                            delivery_date=str(delivery_value or ""),
+                            total=float(total),
+                            status=raw_status,
+                            preview_status=preview_status,
+                            preview_reason=preview_reason,
+                        )
+                    )
+                elif in_range:
+                    preview_status_counts["blocked_in_range"] += 1
+                    if not preview_reason:
+                        preview_reason = preview_status
+                    preview_orders.append(
+                        self._build_preview_order(
+                            order_id=order_id,
+                            customer_name=str(customer_name),
+                            buyer_name=str(buyer_name) if buyer_name else None,
+                            buyer_id=str(buyer_id) if buyer_id is not None else None,
+                            delivery_address=str(delivery_address) if delivery_address else None,
+                            delivery_date=str(delivery_value or ""),
+                            total=float(total),
+                            status=raw_status,
+                            preview_status=preview_status,
+                            preview_reason=preview_reason,
+                        )
+                    )
+                else:
+                    if not preview_reason:
+                        preview_reason = "Outside selected range"
+                    if order_id not in dropped_order_ids and len(dropped_orders) < PREVIEW_MAX_DROPPED_DETAILS:
+                        dropped_order_ids.add(order_id)
+                        dropped_orders.append(
+                            {
+                                "id": order_id,
+                                "reason": preview_reason,
+                                "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
+                                "finalDeliveryDate": None if delivery_value is None else str(delivery_value),
+                                "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
+                                "selectedFrom": date_from,
+                                "selectedTo": date_to,
+                            }
+                        )
 
             if not next_token:
                 break
@@ -1893,212 +2034,10 @@ class UnifyService:
         logger.info(
             "Unify raw orders fetch finished raw_count=%s unique_count=%s page_count=%s duration_seconds=%.3f",
             raw_count,
-            len(raw_orders),
+            raw_count - duplicate_raw_count,
             raw_page_count,
             raw_fetch_duration,
         )
-
-        preview_orders: List[UnifyOrderPreview] = []
-        preview_status_counts = {"ready": 0, "blocked_in_range": 0}
-        dropped_out_of_range_count = 0
-        total_in_range_orders = 0
-        detail_fallback_attempts = 0
-        detail_fallback_failures = 0
-        detail_fallback_duration = 0.0
-        buyer_map: Optional[Dict[str, str]] = None
-
-        for raw in raw_orders:
-            order_id = self._extract_order_id(raw)
-            if not order_id:
-                if "<missing>" not in dropped_order_ids:
-                    dropped_order_ids.add("<missing>")
-                    dropped_orders.append({"id": "<missing>", "reason": "missing_order_id"})
-                continue
-
-            raw_delivery_value = self._extract_raw_delivery_date_value(raw)
-            delivery_value = raw_delivery_value
-            parsed_delivery_date = self._parse_date_value(delivery_value) if delivery_value else None
-            detail_fallback_used = False
-            if not parsed_delivery_date:
-                detail_fallback_attempts += 1
-                detail_started_at = time.perf_counter()
-                try:
-                    delivery_value, parsed_delivery_date_str, detail_fallback_used = await self._resolve_delivery_date_for_preview(
-                        raw,
-                        order_id,
-                        allow_detail_fallback=True,
-                    )
-                    if parsed_delivery_date_str:
-                        parsed_delivery_date = self._parse_date_value(parsed_delivery_date_str)
-                    if detail_fallback_used:
-                        delivery_value = delivery_value or parsed_delivery_date_str
-                        if order_id in target_order_traces:
-                            target_order_traces[order_id]["detail_fetch_attempted"] = True
-                            target_order_traces[order_id]["detail_fetch_succeeded"] = True
-                except UnifyServiceError as exc:
-                    detail_fallback_failures += 1
-                    logger.warning("Unify deliveryDate fallback failed for order_id=%s: %s", order_id, exc)
-                    if order_id in target_order_traces:
-                        target_order_traces[order_id]["detail_fetch_attempted"] = True
-                        target_order_traces[order_id]["detail_fetch_succeeded"] = False
-                    delivery_value = raw_delivery_value
-                    parsed_delivery_date = self._parse_date_value(delivery_value) if delivery_value else None
-                    if not delivery_value:
-                        delivery_value = None
-                finally:
-                    detail_fallback_duration += time.perf_counter() - detail_started_at
-            if order_id in target_order_traces:
-                target_order_traces[order_id]["detail_fetch_attempted"] = detail_fallback_used
-                target_order_traces[order_id]["detail_fetch_succeeded"] = detail_fallback_used
-                target_order_traces[order_id]["detail_delivery_date"] = None if delivery_value is None else str(delivery_value)
-            raw_status = self._extract_status(raw) or "confirmed"
-            buyer_id = raw.get("buyerId") or raw.get("buyer_id") or (raw.get("buyer") or {}).get("id")
-            buyer_name = None
-            customer_name = None
-            delivery_address = None
-
-            total = self._to_major_currency(raw.get("totalNetAmount") or raw.get("total_net_amount"))
-
-            preview_status = "ready"
-            preview_reason = ""
-            if not delivery_value:
-                preview_status = "blocked"
-                preview_reason = "Missing delivery date in raw preview"
-            elif not parsed_delivery_date:
-                preview_status = "blocked"
-                preview_reason = "Unparseable delivery date"
-            elif not parsed_start_date or not parsed_end_date:
-                preview_status = "blocked"
-                preview_reason = "Invalid selected date range"
-            elif not (parsed_start_date <= parsed_delivery_date <= parsed_end_date):
-                preview_status = "blocked"
-                preview_reason = "Outside selected range"
-            elif raw_status and not self._is_preview_ready_status(raw_status):
-                preview_status = "blocked"
-                preview_reason = f"Order status {raw_status}"
-
-            in_range = bool(
-                parsed_delivery_date
-                and parsed_start_date
-                and parsed_end_date
-                and parsed_start_date <= parsed_delivery_date <= parsed_end_date
-            )
-            if in_range:
-                total_in_range_orders += 1
-            else:
-                dropped_out_of_range_count += 1
-
-            if in_range:
-                buyer_organisation = None
-                if buyer_id is not None:
-                    try:
-                        buyer_organisation = await self.fetch_buyer_organisation(str(buyer_id))
-                    except UnifyServiceError as exc:
-                        logger.warning(
-                            "Unify buyer organisation fetch failed during preview name resolution order_id=%s buyer_id=%s: %s",
-                            order_id,
-                            buyer_id,
-                            exc,
-                        )
-                name_source = raw
-                if buyer_name is None and customer_name is None:
-                    try:
-                        name_source = await self.fetch_order_detail(order_id)
-                    except UnifyServiceError as exc:
-                        logger.warning(
-                            "Unify preview customer-name detail fetch failed order_id=%s buyer_id=%s: %s",
-                            order_id,
-                            buyer_id,
-                            exc,
-                        )
-                        name_source = raw
-                buyer_name, customer_name, delivery_address = self._resolve_buyer_details(
-                    name_source,
-                    str(buyer_id) if buyer_id is not None else None,
-                    buyer_map,
-                    buyer_organisation,
-                )
-                if not customer_name:
-                    customer_name = f"Customer {buyer_id}" if buyer_id is not None else order_id
-                logger.info(
-                    "Unify preview customer resolution order_id=%s buyer_id=%s buyer_name=%s customer_name=%s",
-                    order_id,
-                    buyer_id,
-                    buyer_name,
-                    customer_name,
-                )
-
-            if preview_status == "ready":
-                preview_status_counts["ready"] += 1
-                preview_orders.append(
-                    self._build_preview_order(
-                        order_id=order_id,
-                        customer_name=str(customer_name),
-                        buyer_name=str(buyer_name) if buyer_name else None,
-                        buyer_id=str(buyer_id) if buyer_id is not None else None,
-                        delivery_address=str(delivery_address) if delivery_address else None,
-                        delivery_date=str(delivery_value or ""),
-                        total=float(total),
-                        status=raw_status,
-                        preview_status=preview_status,
-                        preview_reason=preview_reason,
-                    )
-                )
-            elif in_range:
-                preview_status_counts["blocked_in_range"] += 1
-                if not preview_reason:
-                    preview_reason = preview_status
-                preview_orders.append(
-                    self._build_preview_order(
-                        order_id=order_id,
-                        customer_name=str(customer_name),
-                        buyer_name=str(buyer_name) if buyer_name else None,
-                        buyer_id=str(buyer_id) if buyer_id is not None else None,
-                        delivery_address=str(delivery_address) if delivery_address else None,
-                        delivery_date=str(delivery_value or ""),
-                        total=float(total),
-                        status=raw_status,
-                        preview_status=preview_status,
-                        preview_reason=preview_reason,
-                    )
-                )
-            else:
-                if not preview_reason:
-                    preview_reason = "Outside selected range"
-                if order_id not in dropped_order_ids:
-                    dropped_order_ids.add(order_id)
-                    dropped_orders.append(
-                        {
-                            "id": order_id,
-                            "reason": preview_reason,
-                            "rawDeliveryDate": None if raw_delivery_value is None else str(raw_delivery_value),
-                            "finalDeliveryDate": None if delivery_value is None else str(delivery_value),
-                            "parsedDeliveryDate": parsed_delivery_date.isoformat() if parsed_delivery_date else None,
-                            "selectedFrom": date_from,
-                            "selectedTo": date_to,
-                        }
-                    )
-
-            if order_id in target_order_traces:
-                trace = target_order_traces[order_id]
-                trace["passed_filter"] = preview_status == "ready"
-                trace["dropped_reason"] = None if preview_status == "ready" else preview_reason
-                trace["included_in_preview"] = in_range
-
-        for order_id in sorted(target_order_traces):
-            trace = target_order_traces[order_id]
-            logger.info(
-                "order_trace order_id=%s raw_found=%s page=%s detail_fetched=%s detail_fetch_succeeded=%s final_delivery_date=%s passed_filter=%s dropped_reason=%s included_in_preview=%s",
-                order_id,
-                trace["raw_found"],
-                trace["raw_found_page"],
-                trace["detail_fetch_attempted"],
-                trace["detail_fetch_succeeded"],
-                trace["detail_delivery_date"],
-                trace["passed_filter"],
-                trace["dropped_reason"],
-                trace["included_in_preview"],
-            )
 
         total_duration = time.perf_counter() - request_started_at
         preview_count = len(preview_orders)
@@ -2129,9 +2068,6 @@ class UnifyService:
             "rawOrdersCount": raw_count,
             "rawPageCount": raw_page_count,
             "total_scanned_orders": raw_count,
-            "rawPageTokens": raw_page_tokens,
-            "rawOrderIds": raw_order_ids,
-            "rawOrderIdsByPage": raw_order_ids_by_page,
             "statusesUsed": statuses_used,
             "pageSizeUsed": page_size_used,
             "previewTruncated": preview_truncated,
@@ -2157,7 +2093,6 @@ class UnifyService:
             "totalDurationSeconds": total_duration,
             "dateFrom": date_from,
             "dateTo": date_to,
-            "includedOrderIds": [order.order_id for order in preview_orders],
         }
         return preview_orders
 
@@ -2884,7 +2819,7 @@ class UnifyService:
             "itemFetchFailures": item_fetch_failed_count,
             "missingItemsCount": missing_items_count,
             "mappingIssueCount": mapping_issue_count,
-            "buyersFetchFailed": buyers_fetch_failed,
+            "buyersFetchFailed": False,
             "productsFetchFailed": products_fetch_failed,
             "droppedOrdersCount": len(dropped_orders),
             "droppedOrders": dropped_orders,
