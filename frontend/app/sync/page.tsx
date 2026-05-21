@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as XLSX from "xlsx";
 import { AppShell } from "../../components/app-shell";
@@ -343,6 +343,70 @@ function Spinner() {
   );
 }
 
+function UploadCloudIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-6 w-6">
+      <path
+        d="M7.5 18.5h9A4.5 4.5 0 0 0 18 9.65a5.5 5.5 0 0 0-10.63-1.49A3.75 3.75 0 0 0 7.5 18.5Zm4.5-9v6m0-6-2.2 2.2M12 9.5l2.2 2.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+function DocumentIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M7 3.5h6.4L18.5 8v12A2.5 2.5 0 0 1 16 22.5H7A2.5 2.5 0 0 1 4.5 20V6A2.5 2.5 0 0 1 7 3.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.6"
+      />
+      <path d="M13.5 3.5V8H18" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function CheckBadgeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M12 2.9 14.7 5l3.4.5 1.4 3.1-.3 3.5 2.1 2.8-2.1 2.8.3 3.5-3.4.5-2.7 2.1-2.7-2.1-3.4-.5-.3-3.5-2.1-2.8 2.1-2.8-.3-3.5L8.6 5 12 2.9Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+      <path d="m8.8 12.4 2.1 2.1 4.4-4.8" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path
+        d="M12 3.5 21 19.5H3L12 3.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.6"
+      />
+      <path d="M12 9v4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+      <path d="M12 16.9h.01" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" />
+    </svg>
+  );
+}
+
 export default function SyncPage() {
   const [dateFrom, setDateFrom] = useState<Date | null>(null);
   const [dateTo, setDateTo] = useState<Date | null>(null);
@@ -363,6 +427,8 @@ export default function SyncPage() {
   const [activeSource, setActiveSource] = useState<SyncSource | null>(null);
   const [csvFileName, setCsvFileName] = useState<string>("");
   const [csvLoading, setCsvLoading] = useState(false);
+  const [csvDragActive, setCsvDragActive] = useState(false);
+  const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   const dedupeOrders = (items: UnifiedOrder[]) => {
     const seen = new Set<string>();
@@ -386,7 +452,30 @@ export default function SyncPage() {
     setOrderDetailsLoading({});
     setActiveSource(null);
     setCsvFileName("");
+    setCsvDragActive(false);
   };
+
+  const openCsvPicker = () => {
+    csvInputRef.current?.click();
+  };
+
+  const handleCsvSelection = (file?: File | null) => {
+    if (!file) {
+      return;
+    }
+    void previewCsvFile(file);
+  };
+
+  const csvFileExtension = csvFileName ? csvFileName.split(".").pop()?.toUpperCase() || "FILE" : "FILE";
+  const csvUploadSucceeded = activeSource === "csv" && orders.length > 0 && !csvLoading;
+  const csvUploadMessage = message.startsWith("Error:") && (csvFileName || csvLoading || activeSource === "csv") ? message : "";
+  const csvUploadHelperState = csvLoading
+    ? "Parsing and previewing your file."
+    : csvUploadSucceeded
+      ? `Preview ready with ${orders.length} order${orders.length === 1 ? "" : "s"}.`
+      : csvFileName
+        ? "File selected. You can replace it or clear the preview."
+        : "Upload a Unify report to preview and sync orders without using the date-based fetch.";
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -954,74 +1043,282 @@ export default function SyncPage() {
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[1.3fr_0.7fr]">
-            <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+            <section
+              className={[
+                "relative overflow-hidden rounded-3xl border bg-white/95 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.32)] transition",
+                csvDragActive ? "border-emerald-300 ring-4 ring-emerald-100/70" : "border-slate-200",
+              ].join(" ")}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setCsvDragActive(true);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setCsvDragActive(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                setCsvDragActive(false);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setCsvDragActive(false);
+                const file = event.dataTransfer.files?.[0];
+                handleCsvSelection(file);
+              }}
+              onClick={openCsvPicker}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  openCsvPicker();
+                }
+              }}
+            >
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(16,185,129,0.12),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.9)_0%,rgba(248,250,252,0.96)_100%)]" />
+              <input
+                ref={csvInputRef}
+                type="file"
+                accept=".csv,.tsv,.txt,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="hidden"
+                disabled={loading || csvLoading}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  handleCsvSelection(file);
+                }}
+              />
+
+              <div className="relative p-6 sm:p-7">
+                <div className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="max-w-2xl">
+                      <span
+                        className={[
+                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]",
+                          activeSource === "csv"
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : "border-slate-200 bg-white text-slate-500",
+                        ].join(" ")}
+                      >
+                        {activeSource === "csv" ? "CSV active" : "Optional"}
+                      </span>
+                      <h3 className="mt-3 text-xl font-semibold tracking-tight text-slate-950">Upload CSV or Excel</h3>
+                      <p className="mt-2 max-w-xl text-sm leading-6 text-slate-600">
+                        Upload a Unify report to preview and sync orders without using the date-based fetch.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 shadow-sm">
+                        Supports .csv, .xlsx, .xls
+                      </span>
+                      <span
+                        className={[
+                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]",
+                          csvUploadSucceeded
+                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                            : csvLoading
+                              ? "border-amber-200 bg-amber-50 text-amber-700"
+                              : "border-slate-200 bg-white text-slate-500",
+                        ].join(" ")}
+                      >
+                        {csvLoading ? "Processing" : csvUploadSucceeded ? "Parsed" : "Ready"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div
+                    className={[
+                      "rounded-3xl border border-dashed p-6 shadow-sm transition sm:p-7",
+                      csvDragActive
+                        ? "border-emerald-300 bg-emerald-50/80 shadow-[0_16px_35px_-26px_rgba(16,185,129,0.35)]"
+                        : csvLoading
+                          ? "border-emerald-200 bg-white/90"
+                          : csvUploadSucceeded
+                            ? "border-emerald-200 bg-emerald-50/60"
+                            : "border-slate-200 bg-white/95",
+                    ].join(" ")}
+                  >
+                    <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="flex items-start gap-4">
+                        <div
+                          className={[
+                            "flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border shadow-sm transition",
+                            csvDragActive
+                              ? "border-emerald-200 bg-emerald-600 text-white"
+                              : csvUploadSucceeded
+                                ? "border-emerald-200 bg-emerald-600 text-white"
+                                : "border-slate-200 bg-slate-950 text-white",
+                          ].join(" ")}
+                        >
+                          <UploadCloudIcon />
+                        </div>
+                        <div className="min-w-0 space-y-2">
+                          <p className="text-base font-semibold tracking-tight text-slate-950">
+                            {csvLoading
+                              ? "Parsing file..."
+                              : csvFileName
+                                ? "Drop a new file to replace the current preview"
+                                : "Drag and drop your file here"}
+                          </p>
+                          <p className="max-w-2xl text-sm leading-6 text-slate-600">
+                            {csvUploadHelperState}
+                          </p>
+                          <div className="flex flex-wrap gap-2 pt-1 text-xs text-slate-500">
+                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
+                              Fast preview
+                            </span>
+                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
+                              Same export pipeline
+                            </span>
+                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
+                              No date fetch required
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-3 sm:items-end">
+                        <button
+                          type="button"
+                          className="inline-flex items-center justify-center rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_28px_-18px_rgba(15,23,42,0.95)] transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openCsvPicker();
+                          }}
+                          disabled={loading || csvLoading}
+                        >
+                          {csvLoading ? (
+                            <>
+                              <Spinner />
+                              <span className="ml-2">Parsing...</span>
+                            </>
+                          ) : csvFileName ? (
+                            "Replace file"
+                          ) : (
+                            "Upload CSV or Excel"
+                          )}
+                        </button>
+                        <p className="text-xs leading-5 text-slate-400">
+                          Click to browse or drop a file into this zone.
+                        </p>
+                      </div>
+                    </div>
+
+                    {csvLoading && (
+                      <div className="mt-5 flex items-center gap-3 rounded-2xl border border-emerald-100 bg-white/90 px-4 py-3 text-sm text-emerald-700 shadow-sm">
+                        <Spinner />
+                        <div>
+                          <div className="font-medium text-emerald-800">Generating preview</div>
+                          <div className="text-xs text-emerald-600">Reading your Unify file and mapping the order lines.</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {csvFileName && !csvLoading && (
+                      <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto]">
+                        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+                          <div className="flex items-center gap-2">
+                            <DocumentIcon />
+                            <span className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Selected file</span>
+                          </div>
+                          <div className="mt-2 truncate text-sm font-semibold text-slate-950">{csvFileName}</div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold tracking-[0.14em] text-slate-700">
+                              {csvFileExtension}
+                            </span>
+                            <span>{csvUploadSucceeded ? "Parsed successfully and ready to sync." : "Queued for preview."}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 lg:justify-end">
+                          <button
+                            type="button"
+                            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openCsvPicker();
+                            }}
+                            disabled={loading || csvLoading}
+                          >
+                            Replace file
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              clearLoadedState();
+                              setMessage("CSV preview cleared");
+                            }}
+                            disabled={loading || csvLoading || orders.length === 0}
+                          >
+                            Clear preview
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {csvUploadSucceeded && (
+                      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                        <CheckBadgeIcon />
+                        <div>
+                          <div className="font-medium">Preview generated successfully</div>
+                          <div className="mt-1 text-emerald-700">
+                            You can review the orders below, sync now, or replace the file at any time.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {csvUploadMessage && (
+                      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                        <AlertIcon />
+                        <div>
+                          <div className="font-medium">Upload failed</div>
+                          <div className="mt-1 leading-6">{csvUploadMessage}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
+              <div className="flex items-start justify-between gap-4">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">CSV upload</p>
-                  <p className="mt-1 text-sm text-slate-600">Upload a Unify CSV to preview and sync orders through the alternate route.</p>
+                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Mode</div>
+                  <div className="mt-2 text-lg font-semibold tracking-tight text-slate-950">Choose your source</div>
                 </div>
                 {activeSource === "csv" ? (
-                  <span className="inline-flex w-fit items-center rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">
+                  <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
                     CSV active
                   </span>
                 ) : (
-                  <span className="inline-flex w-fit items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
-                    Optional
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    Date sync active
                   </span>
                 )}
               </div>
 
-              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
-                  <input
-                    type="file"
-                    accept=".csv,.tsv,.txt,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    className="hidden"
-                    disabled={loading || csvLoading}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      event.target.value = "";
-                      if (!file) {
-                        return;
-                      }
-                      void previewCsvFile(file);
-                    }}
-                  />
-                  {csvLoading ? "Reading CSV..." : "Choose CSV file"}
-                </label>
-                <div className="text-xs leading-5 text-slate-400">
-                  The CSV preview uses the same order cards and can be synced without changing the date-based flow.
+              <div className="mt-4 space-y-3 text-sm leading-6 text-slate-600">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="font-medium text-slate-950">Date-based fetch</div>
+                  <div className="mt-1">Use the Unify API flow to fetch orders by delivery date as usual.</div>
+                </div>
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="font-medium text-emerald-950">CSV / Excel upload</div>
+                  <div className="mt-1 text-emerald-800">
+                    Upload a report to preview and sync the same invoices without running the date fetch.
+                  </div>
                 </div>
               </div>
 
-              {csvFileName && (
-                <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
-                  Current file: <span className="font-medium text-slate-900">{csvFileName}</span>
-                </div>
-              )}
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Mode</div>
-              <div className="mt-2 text-sm text-slate-700">
-                {activeSource === "csv" ? "CSV preview is active." : "Unify API preview is active or ready."}
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => {
-                    clearLoadedState();
-                    setCsvFileName("");
-                    setMessage("CSV preview cleared");
-                  }}
-                  disabled={loading || csvLoading || orders.length === 0}
-                >
-                  Clear preview
-                </button>
-              </div>
-            </div>
+            </aside>
           </div>
 
           {message && (
