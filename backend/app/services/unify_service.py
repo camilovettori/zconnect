@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import base64
+import io
 import logging
+import re
 import time
+import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import date as date_cls, datetime
 from typing import Any, Dict, List, Optional
 
@@ -34,6 +39,49 @@ UNIFY_PRODUCTS_PAGE_SIZE = 100
 PREVIEW_MAX_ORDERS = 200
 PREVIEW_MAX_DROPPED_DETAILS = 50
 PREVIEW_MAX_DUPLICATE_DETAILS = 20
+
+CSV_ORDER_ID_FIELDS = (
+    "order_id",
+    "orderid",
+    "order_no",
+    "order_number",
+    "order",
+    "id",
+    "pedido",
+    "pedido_id",
+    "numero_pedido",
+    "numero_do_pedido",
+    "pedido_numero",
+    "n_pedido",
+    "numero_do_pedidos",
+    "sales_order_id",
+    "orderref",
+    "order_ref",
+    "order_reference",
+    "reference",
+    "reference_number",
+    "order_no.",
+    "order_no#",
+    "order_number.",
+    "order_number_id",
+    "order_no_id",
+    "order_hash",
+    "id_pedido",
+    "pedido_id_do_pedido",
+)
+CSV_CUSTOMER_NAME_FIELDS = ("buyer", "customer_name", "customer", "buyer_name", "recipient_name", "name")
+CSV_BUYER_ID_FIELDS = ("buyer_account_id", "buyer_accountid", "buyer_id", "buyerid", "customer_id", "customerid", "account_id")
+CSV_ORDER_DATE_FIELDS = ("order_date", "orderdate", "created_at", "created", "date")
+CSV_DELIVERY_DATE_FIELDS = ("for_delivery", "delivery_date", "deliverydate", "ship_date", "requested_delivery_date", "scheduled_delivery_date")
+CSV_DELIVERY_ADDRESS_FIELDS = ("delivery_address", "deliveryaddress", "shipping_address", "address", "ship_to_address")
+CSV_LINE_NAME_FIELDS = ("product", "product_name", "item_name", "description", "name", "item")
+CSV_LINE_SKU_FIELDS = ("product_code", "item_sku", "product_sku", "sku", "item_code")
+CSV_QUANTITY_FIELDS = ("quantity_ordered", "quantity", "qty", "count", "units")
+CSV_PRICE_FIELDS = ("price", "rate", "unit_price", "unitrate", "item_price")
+CSV_LINE_TOTAL_FIELDS = ("net", "line_net", "line_total", "lineamount", "line_amount", "item_total", "row_total", "amount", "net_amount", "total")
+CSV_TAX_PERCENTAGE_FIELDS = ("tax_percentage", "taxpercentage", "tax_rate", "taxrate", "vat_percentage", "vat_rate")
+CSV_STATUS_FIELDS = ("status", "order_status", "state")
+CSV_LINE_TYPE_FIELDS = ("line_type", "linetype", "item_type", "type")
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +148,320 @@ class UnifyService:
         self.client_secret = client_secret.strip()
         self.last_fetch_debug: Dict[str, Any] = {}
         self._sampled_endpoints: set[str] = set()
+
+    def _normalize_csv_header(self, value: Any) -> str:
+        text = self._clean_text(value) or ""
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(char for char in text if not unicodedata.combining(char))
+        text = re.sub(r"[^a-z0-9]+", "_", text.lower())
+        return text.strip("_")
+
+    def _build_csv_header_lookup(self, fieldnames: List[str]) -> Dict[str, str]:
+        lookup: Dict[str, str] = {}
+        for fieldname in fieldnames:
+            normalized = self._normalize_csv_header(fieldname)
+            if normalized and normalized not in lookup:
+                lookup[normalized] = fieldname
+        return lookup
+
+    def _csv_value(self, row: Dict[str, Any], header_lookup: Dict[str, str], *field_names: str) -> Optional[str]:
+        for field_name in field_names:
+            normalized = self._normalize_csv_header(field_name)
+            original = header_lookup.get(normalized)
+            if not original:
+                continue
+            text = self._clean_text(row.get(original))
+            if text:
+                return text
+        return None
+
+    def _parse_csv_number(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, dict):
+            for key in ("amount", "value", "total", "netAmount", "net_amount"):
+                parsed = self._parse_csv_number(value.get(key))
+                if parsed is not None:
+                    return parsed
+            return None
+
+        text = self._clean_text(value)
+        if not text:
+            return None
+
+        cleaned = text.replace("\u00a0", "").replace("€", "").replace("$", "").replace("£", "")
+        cleaned = cleaned.replace(" ", "")
+        if "," in cleaned and "." in cleaned:
+            if cleaned.rfind(",") > cleaned.rfind("."):
+                cleaned = cleaned.replace(".", "").replace(",", ".")
+            else:
+                cleaned = cleaned.replace(",", "")
+        elif "," in cleaned:
+            cleaned = cleaned.replace(",", ".")
+        cleaned = re.sub(r"[^0-9\.-]", "", cleaned)
+        if cleaned in {"", ".", "-", "-."}:
+            return None
+
+        try:
+            return float(Decimal(cleaned))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _parse_csv_date(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = self._clean_text(value)
+        if not text:
+            return None
+
+        candidate = text.split("T", 1)[0].split(" ", 1)[0]
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(candidate, fmt).date().isoformat()
+            except ValueError:
+                continue
+
+        parsed = self._parse_date_value(text)
+        return parsed.isoformat() if parsed else text
+
+    def _parse_csv_line_type(self, value: Any, item_name: Optional[str]) -> str:
+        text = self._clean_text(value)
+        if text:
+            normalized = text.lower()
+            if "delivery" in normalized or "shipping" in normalized or "postage" in normalized:
+                return "delivery"
+            return normalized
+        normalized_name = (item_name or "").lower()
+        if "delivery" in normalized_name or "shipping" in normalized_name or "postage" in normalized_name:
+            return "delivery"
+        return "product"
+
+    def _csv_meaningful_text(self, value: Any) -> Optional[str]:
+        text = self._clean_text(value)
+        if text and self._is_meaningful_customer_label(text):
+            return text
+        return None
+
+    def _parse_csv_line(self, row: Dict[str, Any], header_lookup: Dict[str, str], order_id: str, row_number: int, line_index: int) -> tuple[Optional[OrderLine], bool, List[str], Optional[float]]:
+        fallback_used = False
+        warnings: List[str] = []
+
+        item_name = self._clean_text(self._csv_value(row, header_lookup, *CSV_LINE_NAME_FIELDS))
+        item_sku = self._clean_text(self._csv_value(row, header_lookup, *CSV_LINE_SKU_FIELDS))
+        quantity = self._parse_csv_number(self._csv_value(row, header_lookup, *CSV_QUANTITY_FIELDS))
+        price = self._parse_csv_number(self._csv_value(row, header_lookup, *CSV_PRICE_FIELDS))
+        line_total = self._parse_csv_number(self._csv_value(row, header_lookup, *CSV_LINE_TOTAL_FIELDS))
+        tax_percentage = self._parse_csv_number(self._csv_value(row, header_lookup, *CSV_TAX_PERCENTAGE_FIELDS))
+        line_type = self._parse_csv_line_type(self._csv_value(row, header_lookup, *CSV_LINE_TYPE_FIELDS), item_name)
+
+        if item_name is None and item_sku is None:
+            fallback_used = True
+            warnings.append(f"CSV row {row_number} for order {order_id} is missing product and product code; using a synthesized line name")
+            item_name = f"Order {order_id} line {line_index}"
+        elif item_name is None:
+            fallback_used = True
+            item_name = item_sku
+        elif item_sku is None:
+            fallback_used = True
+            item_sku = item_name
+
+        if quantity is None and price is None and line_total is None:
+            raise UnifyServiceError(f"CSV row {row_number} for order {order_id} is missing quantity, price and total")
+
+        if quantity is None:
+            if price is not None and line_total is not None and price > 0:
+                quantity = line_total / price
+            elif line_total is not None and price is None:
+                quantity = 1.0
+                price = line_total
+            else:
+                quantity = 1.0
+
+        if price is None:
+            if line_total is not None and quantity and quantity > 0:
+                price = line_total / quantity
+            else:
+                price = 0.0
+
+        if line_total is None:
+            line_total = quantity * price
+        if price < 0 or quantity <= 0:
+            raise UnifyServiceError(f"CSV row {row_number} for order {order_id} has invalid quantity or price")
+
+        line = OrderLine(
+            item_sku=str(item_sku or item_name or order_id),
+            item_name=str(item_name or item_sku or f"Order {order_id} line {line_index}"),
+            quantity=float(quantity),
+            price=float(price),
+            unify_product_key=str(item_sku or item_name or order_id),
+            product_id=str(item_sku or item_name or order_id),
+            tax_percentage=float(tax_percentage) if tax_percentage is not None else None,
+            line_type=line_type,
+        )
+        return line, fallback_used, warnings, float(line_total)
+
+    def parse_unify_csv_orders(self, csv_text: str) -> tuple[List[UnifyOrder], Dict[str, Any]]:
+        text = (csv_text or "").lstrip("\ufeff").strip()
+        if not text:
+            raise UnifyServiceError("CSV content is empty")
+
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except Exception:
+            dialect = csv.excel
+
+        reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        if not reader.fieldnames:
+            raise UnifyServiceError("CSV header row is missing")
+
+        header_lookup = self._build_csv_header_lookup(reader.fieldnames)
+        if not any(self._normalize_csv_header(field) in header_lookup for field in CSV_ORDER_ID_FIELDS):
+            raise UnifyServiceError("CSV is missing an order_id column")
+
+        grouped_orders: Dict[str, Dict[str, Any]] = {}
+        row_count = 0
+        blank_row_count = 0
+        order_row_sequence = 0
+        warnings: List[str] = []
+
+        for row_number, row in enumerate(reader, start=2):
+            if not row or all(not self._clean_text(value) for value in row.values()):
+                blank_row_count += 1
+                continue
+
+            row_count += 1
+            order_id = self._csv_value(row, header_lookup, *CSV_ORDER_ID_FIELDS)
+            if not order_id:
+                raise UnifyServiceError(f"CSV row {row_number} is missing order_id")
+
+            bucket = grouped_orders.get(order_id)
+            if bucket is None:
+                order_row_sequence += 1
+                bucket = {
+                    "order_id": order_id,
+                    "row_index": order_row_sequence,
+                    "customer_name": None,
+                    "buyer_name": None,
+                    "buyer_id": None,
+                    "order_date": None,
+                    "delivery_date": None,
+                    "delivery_address": None,
+                    "status": None,
+                    "order_total": None,
+                    "total_net_amount": None,
+                    "total_vat_amount": None,
+                    "total_delivery_fee": None,
+                    "lines": [],
+                    "line_totals": [],
+                    "line_fallback_used": False,
+                    "line_count": 0,
+                    "line_warnings": [],
+                }
+                grouped_orders[order_id] = bucket
+
+            bucket["customer_name"] = bucket["customer_name"] or self._csv_meaningful_text(self._csv_value(row, header_lookup, *CSV_CUSTOMER_NAME_FIELDS))
+            bucket["buyer_name"] = bucket["buyer_name"] or bucket["customer_name"]
+            bucket["buyer_id"] = bucket["buyer_id"] or self._csv_value(row, header_lookup, *CSV_BUYER_ID_FIELDS)
+            bucket["order_date"] = bucket["order_date"] or self._parse_csv_date(self._csv_value(row, header_lookup, *CSV_ORDER_DATE_FIELDS))
+            bucket["delivery_date"] = bucket["delivery_date"] or self._parse_csv_date(self._csv_value(row, header_lookup, *CSV_DELIVERY_DATE_FIELDS))
+            bucket["delivery_address"] = bucket["delivery_address"] or self._csv_value(row, header_lookup, *CSV_DELIVERY_ADDRESS_FIELDS)
+            bucket["status"] = bucket["status"] or self._csv_value(row, header_lookup, *CSV_STATUS_FIELDS)
+
+            vat_total = self._parse_csv_number(self._csv_value(row, header_lookup, "total_vat_amount", "vat_total", "vat_amount", "tax_total"))
+            if bucket["total_vat_amount"] is None and vat_total is not None:
+                bucket["total_vat_amount"] = vat_total
+
+            delivery_fee = self._parse_csv_number(self._csv_value(row, header_lookup, "total_delivery_fee", "delivery_fee", "shipping_fee", "delivery_charge"))
+            if bucket["total_delivery_fee"] is None and delivery_fee is not None:
+                bucket["total_delivery_fee"] = delivery_fee
+
+            parsed_line, fallback_used, row_warnings, parsed_line_total = self._parse_csv_line(row, header_lookup, order_id, row_number, bucket["line_count"] + 1)
+            bucket["lines"].append(parsed_line)
+            bucket["line_totals"].append(float(parsed_line_total if parsed_line_total is not None else parsed_line.quantity * parsed_line.price))
+            bucket["line_count"] += 1
+            bucket["line_fallback_used"] = bucket["line_fallback_used"] or fallback_used
+            bucket["line_warnings"].extend(row_warnings)
+
+        if not grouped_orders:
+            raise UnifyServiceError("CSV did not contain any order rows")
+
+        orders: List[UnifyOrder] = []
+        mapping_issue_count = 0
+        blocked_count = 0
+        for order_id, bucket in grouped_orders.items():
+            lines = bucket["lines"]
+            if not lines:
+                raise UnifyServiceError(f"CSV order {order_id} did not contain any line items")
+
+            order_total = sum(float(value) for value in bucket["line_totals"]) if bucket["line_totals"] else sum(line.quantity * line.price for line in lines)
+
+            order_date = bucket["order_date"] or bucket["delivery_date"] or ""
+            delivery_date = bucket["delivery_date"] or bucket["order_date"] or ""
+            customer_name = bucket["customer_name"] or bucket["buyer_name"] or (
+                f"Customer {bucket['buyer_id']}" if bucket["buyer_id"] else None
+            ) or f"Customer {order_id}"
+            buyer_name = bucket["buyer_name"] or customer_name
+            buyer_id = bucket["buyer_id"]
+            preview_status = "mapping_issue" if bucket["line_fallback_used"] else "ready"
+            preview_reason = "Some CSV line items used synthesized names or SKUs" if bucket["line_fallback_used"] else ""
+
+            if not order_date:
+                preview_status = "blocked"
+                preview_reason = preview_reason or "Missing order date"
+            if not delivery_date:
+                preview_status = "blocked"
+                preview_reason = preview_reason or "Missing delivery date"
+            if not lines:
+                preview_status = "blocked"
+                preview_reason = preview_reason or "No line items parsed"
+
+            if preview_status == "mapping_issue":
+                mapping_issue_count += 1
+            elif preview_status != "ready":
+                blocked_count += 1
+
+            orders.append(
+                UnifyOrder(
+                    order_id=order_id,
+                    customer_name=str(customer_name),
+                    buyer_name=str(buyer_name) if buyer_name else None,
+                    order_date=str(order_date),
+                    delivery_date=str(delivery_date),
+                    delivery_address=str(bucket["delivery_address"]) if bucket["delivery_address"] else None,
+                    lines=lines,
+                    total=float(order_total),
+                    buyer_id=str(buyer_id) if buyer_id else None,
+                    status=str(bucket["status"] or "confirmed"),
+                    preview_status=preview_status,
+                    preview_reason=preview_reason,
+                    total_net_amount=float(order_total),
+                    total_vat_amount=float(bucket["total_vat_amount"] or 0.0),
+                    total_delivery_fee=float(bucket["total_delivery_fee"] or 0.0),
+                )
+            )
+
+            warnings.extend(bucket["line_warnings"])
+
+        debug_summary = {
+            "source": "csv",
+            "csv_row_count": row_count,
+            "csv_blank_row_count": blank_row_count,
+            "csv_order_count": len(orders),
+            "csv_header_fields": list(reader.fieldnames),
+            "mapping_issue_count": mapping_issue_count,
+            "blocked_count": blocked_count,
+            "previewOrdersCount": len(orders),
+            "rawOrdersCount": len(orders),
+            "total_in_range_orders": len(orders),
+            "previewTruncated": False,
+            "previewTruncationReason": None,
+            "warnings": warnings,
+        }
+        self.last_fetch_debug = dict(debug_summary)
+        return orders, debug_summary
 
     def _cache_key(self) -> str:
         return "|".join([self.base_url, self.client_id, self.client_secret])

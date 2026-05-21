@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import * as XLSX from "xlsx";
 import { AppShell } from "../../components/app-shell";
 import { formatCurrencyEur } from "../utils/money";
 import { Calendar } from "../../components/ui/calendar";
@@ -23,9 +24,20 @@ type UnifyOrderPreview = {
   status?: string;
 };
 
+type UnifiedOrder = UnifyOrderPreview & {
+  order_date?: string;
+  lines?: OrderLine[];
+  total_net_amount?: number;
+  total_vat_amount?: number;
+  total_delivery_fee?: number;
+};
+
 type UnifyOrderDetail = UnifyOrderPreview & {
   order_date: string;
   lines: OrderLine[];
+  total_net_amount?: number;
+  total_vat_amount?: number;
+  total_delivery_fee?: number;
 };
 
 type CustomerSummary = { order_count: number; total: number };
@@ -48,6 +60,7 @@ type SyncResult = {
 };
 
 type FetchSummary = {
+  source?: string;
   preview_count?: number;
   ready_count?: number;
   blocked_in_range_count?: number;
@@ -67,10 +80,12 @@ type FetchSummary = {
 };
 
 type OrderStatus = "ready" | "already_synced" | "synced" | "failed";
+type SyncSource = "api" | "csv";
 type DateRange = { from: Date; to: Date };
 
 const FETCH_TIMEOUT_MS = 95000;
 const HISTORY_RESET_SIGNAL_KEY = "zconnect:last-selected-run-reset-at";
+const SUPPORTED_UPLOAD_EXTENSIONS = [".csv", ".tsv", ".txt", ".xlsx", ".xls"];
 
 const tryParseJson = (text: string) => {
   try {
@@ -331,7 +346,7 @@ function Spinner() {
 export default function SyncPage() {
   const [dateFrom, setDateFrom] = useState<Date | null>(null);
   const [dateTo, setDateTo] = useState<Date | null>(null);
-  const [orders, setOrders] = useState<UnifyOrderPreview[]>([]);
+  const [orders, setOrders] = useState<UnifiedOrder[]>([]);
   const [customers, setCustomers] = useState<Record<string, CustomerSummary>>({});
   const [message, setMessage] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -345,8 +360,11 @@ export default function SyncPage() {
   const [syncConfirmOpen, setSyncConfirmOpen] = useState(false);
   const [syncRunning, setSyncRunning] = useState(false);
   const [pendingSyncOrderIds, setPendingSyncOrderIds] = useState<string[]>([]);
+  const [activeSource, setActiveSource] = useState<SyncSource | null>(null);
+  const [csvFileName, setCsvFileName] = useState<string>("");
+  const [csvLoading, setCsvLoading] = useState(false);
 
-  const dedupeOrders = (items: UnifyOrderPreview[]) => {
+  const dedupeOrders = (items: UnifiedOrder[]) => {
     const seen = new Set<string>();
     return items.filter((order) => {
       if (seen.has(order.order_id)) {
@@ -366,6 +384,8 @@ export default function SyncPage() {
     setExpandedOrderIds(new Set());
     setOrderDetails({});
     setOrderDetailsLoading({});
+    setActiveSource(null);
+    setCsvFileName("");
   };
 
   useEffect(() => {
@@ -382,11 +402,11 @@ export default function SyncPage() {
 
   const getResultByOrderId = (orderId: string) => exportResult?.details?.find((item) => item.order_id === orderId);
 
-  const getOrderStatus = (order: UnifyOrderPreview): OrderStatus => {
+  const getOrderStatus = (order: UnifiedOrder): OrderStatus => {
     if (order.already_exported) {
       return "already_synced";
     }
-    if (order.preview_status && order.preview_status !== "ready") return "failed";
+    if (order.preview_status && !["ready", "mapping_issue"].includes(order.preview_status)) return "failed";
     const result = getResultByOrderId(order.order_id);
     if (result?.status === "created") return "synced";
     if (result?.status === "failed") return "failed";
@@ -399,8 +419,6 @@ export default function SyncPage() {
     .map((order) => order.order_id);
   const exportedCount = orders.filter((order) => order.already_exported).length;
   const previewOrderCount = orders.length;
-  const readyPreviewCount = orders.filter((order) => order.preview_status === "ready").length;
-  const blockedInRangePreviewCount = orders.filter((order) => order.preview_status !== "ready").length;
   const droppedOutOfRangeCount = fetchSummary?.dropped_out_of_range_count ?? 0;
 
   const describeError = (error: unknown) => {
@@ -425,7 +443,7 @@ export default function SyncPage() {
     return trimmed.length > 0 && /[A-Za-z]/.test(trimmed);
   };
 
-  const resolveCustomerDisplayName = (order: UnifyOrderPreview) =>
+  const resolveCustomerDisplayName = (order: UnifiedOrder) =>
     [
       order.buyer_name,
       order.customer_name,
@@ -433,9 +451,19 @@ export default function SyncPage() {
       `Customer ${order.order_id}`,
     ].find((candidate) => isMeaningfulCustomerLabel(candidate)) || `Customer ${order.order_id}`;
 
-  const getBuyerDisplayName = (order: UnifyOrderPreview) => resolveCustomerDisplayName(order);
-  const getCustomerDisplayName = (order: UnifyOrderPreview) => resolveCustomerDisplayName(order);
-  const getDeliveryLabel = (order: UnifyOrderPreview | UnifyOrderDetail) => order.delivery_date || order.order_date || "";
+  const getBuyerDisplayName = (order: UnifiedOrder) => resolveCustomerDisplayName(order);
+  const getCustomerDisplayName = (order: UnifiedOrder) => resolveCustomerDisplayName(order);
+  const getDeliveryLabel = (order: UnifiedOrder | UnifyOrderDetail) => order.delivery_date || order.order_date || "";
+  const getOrderDetail = (order: UnifiedOrder) => {
+    if (order.lines && order.lines.length > 0) {
+      return {
+        ...order,
+        order_date: order.order_date || order.delivery_date || "",
+        lines: order.lines,
+      } as UnifyOrderDetail;
+    }
+    return orderDetails[order.order_id];
+  };
   const getSyncSummary = (orderIds: string[]) => {
     const selectedOrders = orders.filter((order) => orderIds.includes(order.order_id));
     const selectedCustomers = new Set(selectedOrders.map((order) => getBuyerDisplayName(order)));
@@ -457,12 +485,15 @@ export default function SyncPage() {
     setDateFrom(normalized.from);
     setDateTo(normalized.to);
   };
-  const getPreviewBadgeLabel = (order: UnifyOrderPreview) => {
+  const getPreviewBadgeLabel = (order: UnifiedOrder) => {
     if (order.already_exported) {
       return "Synced";
     }
     if (order.preview_status === "ready") {
       return "Ready to sync";
+    }
+    if (order.preview_status === "mapping_issue") {
+      return "Needs review";
     }
     if (order.status === "new") {
       return "Error";
@@ -470,7 +501,7 @@ export default function SyncPage() {
     return "Blocked";
   };
 
-  const getBadgeClasses = (order: UnifyOrderPreview) => {
+  const getBadgeClasses = (order: UnifiedOrder) => {
     if (order.already_exported) {
       return "border-emerald-200 bg-emerald-50 text-emerald-700";
     }
@@ -500,6 +531,24 @@ export default function SyncPage() {
 
   const loadOrderDetails = async (orderId: string) => {
     if (orderDetails[orderId] || orderDetailsLoading[orderId]) {
+      return;
+    }
+
+    const existingOrder = orders.find((order) => order.order_id === orderId);
+    if (existingOrder?.lines && existingOrder.lines.length > 0) {
+      setOrderDetails((current) => ({
+        ...current,
+        [orderId]: {
+          ...existingOrder,
+          order_date: existingOrder.order_date || existingOrder.delivery_date || "",
+          lines: existingOrder.lines,
+        } as UnifyOrderDetail,
+      }));
+      setExpandedOrderIds((current) => {
+        const next = new Set(current);
+        next.add(orderId);
+        return next;
+      });
       return;
     }
 
@@ -540,6 +589,24 @@ export default function SyncPage() {
       setExpandedOrderIds((current) => {
         const next = new Set(current);
         next.delete(orderId);
+        return next;
+      });
+      return;
+    }
+
+    const existingOrder = orders.find((order) => order.order_id === orderId);
+    if (existingOrder?.lines && existingOrder.lines.length > 0) {
+      setOrderDetails((current) => ({
+        ...current,
+        [orderId]: {
+          ...existingOrder,
+          order_date: existingOrder.order_date || existingOrder.delivery_date || "",
+          lines: existingOrder.lines,
+        } as UnifyOrderDetail,
+      }));
+      setExpandedOrderIds((current) => {
+        const next = new Set(current);
+        next.add(orderId);
         return next;
       });
       return;
@@ -618,6 +685,8 @@ export default function SyncPage() {
       setOrders(responseOrders);
       setCustomers(uniqueCustomers);
       setSelectedOrderIds(new Set());
+      setActiveSource("api");
+      setCsvFileName("");
       console.info("[Sync] State updated", {
         orders: responseOrders.length,
         customers: Object.keys(uniqueCustomers).length,
@@ -643,12 +712,109 @@ export default function SyncPage() {
     }
   };
 
-  const executeExport = async (orderIds: string[], actionLabel = "sync-selected-orders") => {
-    if (!dateFrom || !dateTo) {
-      setMessage("Provide both from and to dates");
+  const readFileAsText = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.onerror = () => reject(new Error("Could not read the selected CSV file"));
+      reader.readAsText(file, "utf-8");
+    });
+
+  const readExcelAsCsvText = async (file: File) => {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const firstSheetName = workbook.SheetNames[0];
+    if (!firstSheetName) {
+      throw new Error("The Excel file does not contain any sheets");
+    }
+
+    const worksheet = workbook.Sheets[firstSheetName];
+    if (!worksheet) {
+      throw new Error("The first sheet in the Excel file is empty");
+    }
+
+    return XLSX.utils.sheet_to_csv(worksheet, { FS: ",", blankrows: false });
+  };
+
+  const readUploadAsCsvText = async (file: File) => {
+    const extension = `.${file.name.split(".").pop()?.toLowerCase() || ""}`;
+    if (extension === ".xlsx" || extension === ".xls") {
+      return readExcelAsCsvText(file);
+    }
+    return readFileAsText(file);
+  };
+
+  const previewCsvFile = async (file: File) => {
+    const extension = `.${file.name.split(".").pop()?.toLowerCase() || ""}`;
+    if (!SUPPORTED_UPLOAD_EXTENSIONS.includes(extension)) {
+      setMessage("Please select a CSV or Excel file");
       return;
     }
 
+    const endpoint = "/api/unify/preview-csv";
+    setLoading(true);
+    setCsvLoading(true);
+    setMessage("");
+    clearLoadedState();
+    setCsvFileName(file.name);
+
+    try {
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      const requestStartedAt = performance.now();
+      console.info("[Sync] CSV preview (upload) started", { fileName: file.name, size: file.size });
+      const res = await fetch(endpoint, {
+        method: "POST",
+        body: fd,
+      });
+      const data = await parseApiResponse<any>(res, "preview-csv", endpoint);
+      const responseOrders = dedupeOrders((data.orders ?? []) as UnifiedOrder[]);
+      const uniqueCustomers = responseOrders.reduce((acc: Record<string, CustomerSummary>, order: UnifiedOrder) => {
+        const key = getBuyerDisplayName(order);
+        if (!acc[key]) {
+          acc[key] = { order_count: 0, total: 0 };
+        }
+        acc[key].order_count += 1;
+        acc[key].total += Number(order.total || 0);
+        return acc;
+      }, {});
+
+      setOrders(responseOrders);
+      setCustomers(uniqueCustomers);
+      setSelectedOrderIds(new Set());
+      setFetchSummary(data.debug_summary ?? null);
+      setActiveSource("csv");
+      console.info("[Sync] CSV preview completed", {
+        fileName: file.name,
+        orders: responseOrders.length,
+        customers: Object.keys(uniqueCustomers).length,
+        durationMs: performance.now() - requestStartedAt,
+        debugSummary: data.debug_summary,
+      });
+      setMessage(
+        responseOrders.length === 0
+          ? `No orders were parsed from ${file.name}`
+          : `Loaded ${responseOrders.length} unique orders from ${file.name}`,
+      );
+    } catch (error) {
+      const text = describeError(error);
+      const errorMessage = resolveErrorMessage(error, text);
+      console.error("[Sync] CSV preview failed", {
+        action: "preview-csv",
+        endpoint,
+        fileName: file.name,
+        error,
+        message: errorMessage,
+      });
+      setMessage(`Error: ${errorMessage}`);
+      setCsvFileName("");
+    } finally {
+      setLoading(false);
+      setCsvLoading(false);
+    }
+  };
+
+  const executeExport = async (orderIds: string[], actionLabel = "sync-selected-orders") => {
     if (!orderIds.length) {
       setMessage("Select at least one order to sync");
       return;
@@ -657,16 +823,43 @@ export default function SyncPage() {
     setLoading(true);
     setSyncRunning(true);
     setMessage("");
-    const endpoint = "/api/export/run";
+    let endpoint = "/api/export/run";
     try {
       const requestStartedAt = performance.now();
-      const isoDateFrom = toISODate(dateFrom);
-      const isoDateTo = toISODate(dateTo);
-      console.info("[Sync] Export payload", { date_from: isoDateFrom, date_to: isoDateTo, order_ids: orderIds });
+      let body: string;
+      if (activeSource === "csv") {
+        const exportOrders = orders
+          .filter((order) => orderIds.includes(order.order_id))
+          .map((order) => ({
+            ...order,
+            order_date: order.order_date || order.delivery_date || "",
+            lines: (order.lines ?? orderDetails[order.order_id]?.lines ?? []).map((line) => ({ ...line })),
+          }));
+        endpoint = "/api/export/run-csv";
+        body = JSON.stringify({
+          orders: exportOrders,
+          date_from: dateFrom ? toISODate(dateFrom) : undefined,
+          date_to: dateTo ? toISODate(dateTo) : undefined,
+        });
+        console.info("[Sync] CSV export payload", {
+          order_ids: orderIds,
+          order_count: exportOrders.length,
+        });
+      } else {
+        if (!dateFrom || !dateTo) {
+          setMessage("Provide both from and to dates");
+          return;
+        }
+        const isoDateFrom = toISODate(dateFrom);
+        const isoDateTo = toISODate(dateTo);
+        console.info("[Sync] Export payload", { date_from: isoDateFrom, date_to: isoDateTo, order_ids: orderIds });
+        body = JSON.stringify({ date_from: isoDateFrom, date_to: isoDateTo, order_ids: orderIds });
+      }
+
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ date_from: isoDateFrom, date_to: isoDateTo, order_ids: orderIds }),
+        body,
       });
       const data = await parseApiResponse<SyncResult>(res, actionLabel, endpoint);
       console.info("[Sync] Export response received", {
@@ -721,6 +914,9 @@ export default function SyncPage() {
   const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
   const selectedReadyCount = orders.filter((order) => selectedOrderIds.has(order.order_id) && getOrderStatus(order) === "ready").length;
   const pendingSyncSummary = getSyncSummary(pendingSyncOrderIds);
+  const syncablePreviewStatuses = new Set(["ready", "mapping_issue"]);
+  const readyPreviewCount = orders.filter((order) => syncablePreviewStatuses.has(order.preview_status ?? "")).length;
+  const blockedInRangePreviewCount = orders.filter((order) => !syncablePreviewStatuses.has(order.preview_status ?? "")).length;
 
   return (
     <AppShell>
@@ -755,6 +951,76 @@ export default function SyncPage() {
               >
                 {loading ? "Working..." : "Sync selected orders"}
               </button>
+            </div>
+          </div>
+
+          <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[1.3fr_0.7fr]">
+            <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">CSV upload</p>
+                  <p className="mt-1 text-sm text-slate-600">Upload a Unify CSV to preview and sync orders through the alternate route.</p>
+                </div>
+                {activeSource === "csv" ? (
+                  <span className="inline-flex w-fit items-center rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">
+                    CSV active
+                  </span>
+                ) : (
+                  <span className="inline-flex w-fit items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                    Optional
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+                <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
+                  <input
+                    type="file"
+                    accept=".csv,.tsv,.txt,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    className="hidden"
+                    disabled={loading || csvLoading}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (!file) {
+                        return;
+                      }
+                      void previewCsvFile(file);
+                    }}
+                  />
+                  {csvLoading ? "Reading CSV..." : "Choose CSV file"}
+                </label>
+                <div className="text-xs leading-5 text-slate-400">
+                  The CSV preview uses the same order cards and can be synced without changing the date-based flow.
+                </div>
+              </div>
+
+              {csvFileName && (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+                  Current file: <span className="font-medium text-slate-900">{csvFileName}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Mode</div>
+              <div className="mt-2 text-sm text-slate-700">
+                {activeSource === "csv" ? "CSV preview is active." : "Unify API preview is active or ready."}
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => {
+                    clearLoadedState();
+                    setCsvFileName("");
+                    setMessage("CSV preview cleared");
+                  }}
+                  disabled={loading || csvLoading || orders.length === 0}
+                >
+                  Clear preview
+                </button>
+              </div>
             </div>
           </div>
 
@@ -861,7 +1127,7 @@ export default function SyncPage() {
 
                 <div className="mt-5 space-y-4">
                   {orders.map((order) => {
-                    const detail = orderDetails[order.order_id];
+                    const detail = getOrderDetail(order);
                     const isExpanded = expandedOrderIds.has(order.order_id);
                     const isLoadingDetail = orderDetailsLoading[order.order_id];
                     return (

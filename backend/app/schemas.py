@@ -96,6 +96,28 @@ class FetchOrdersResponse(BaseModel):
     debug_summary: Optional[Dict[str, Any]] = None
 
 
+class CsvPreviewResponse(BaseModel):
+    total_orders: int
+    total_customers: int
+    customers: Dict[str, Any]
+    orders: List[UnifyOrder]
+    debug_summary: Optional[Dict[str, Any]] = None
+
+
+class ExportCsvRunRequest(BaseModel):
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    orders: List[UnifyOrder]
+
+
+class CsvPreviewResponse(BaseModel):
+    total_orders: int
+    total_customers: int
+    customers: Dict[str, Any]
+    orders: List[UnifyOrder]
+    debug_summary: Optional[Dict[str, Any]] = None
+
+
 class ExportItemLine(BaseModel):
     item_sku: str
     item_name: str
@@ -113,6 +135,12 @@ class ExportRunRequest(BaseModel):
     date_from: str
     date_to: str
     order_ids: Optional[List[str]] = None
+
+
+class ExportCsvRunRequest(BaseModel):
+    orders: List[UnifyOrder]
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
 
 
 class ResetSelectedRunsRequest(BaseModel):

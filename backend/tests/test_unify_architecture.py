@@ -84,9 +84,13 @@ async def test_preview_fetch_skips_item_hydration(monkeypatch):
         preview_calls["items"] += 1
         raise AssertionError("fetch_order_items should not run during preview fetch")
 
+    async def fake_fetch_buyer_organisation(self, buyer_id):
+        return {}
+
     monkeypatch.setattr(UnifyService, "_request", fake_request)
     monkeypatch.setattr(UnifyService, "fetch_order_detail", fake_fetch_order_detail)
     monkeypatch.setattr(UnifyService, "fetch_order_items", fake_fetch_order_items)
+    monkeypatch.setattr(UnifyService, "fetch_buyer_organisation", fake_fetch_buyer_organisation)
 
     svc = UnifyService("https://api.unifyordering.com", "client", "secret")
     started = time.perf_counter()
@@ -317,3 +321,115 @@ def test_single_order_sync_hydrates_only_selected_order_and_creates_invoice(clie
     assert len(exported_orders) == 1
     assert exported_orders[0].unify_order_id == "O-1"
     assert any("TEMP unify single-order sync completed" in record.message for record in caplog.records)
+
+
+@pytest.mark.usefixtures("client")
+def test_csv_preview_route_groups_orders_and_returns_full_lines(client):
+    csv_text = "\n".join(
+        [
+            "order_id,customer_name,buyer_id,order_date,delivery_date,delivery_address,item_name,item_sku,quantity,price,total,tax_percentage",
+            "CSV-1,Unify Customer,B-1,2026-04-02,2026-04-03,1 Main St,Widget,SKU-1,2,5.00,10.00,23",
+            "CSV-1,Unify Customer,B-1,2026-04-02,2026-04-03,1 Main St,Shipping,DELIVERY,1,2.50,2.50,23",
+        ]
+    )
+
+    response = client.post(
+        "/api/unify/preview-csv",
+        content=csv_text.encode("utf-8"),
+        headers={"Content-Type": "text/csv; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_orders"] == 1
+    assert payload["total_customers"] == 1
+    assert payload["debug_summary"]["source"] == "csv"
+    assert payload["orders"][0]["order_id"] == "CSV-1"
+    assert len(payload["orders"][0]["lines"]) == 2
+    assert payload["orders"][0]["lines"][0]["item_name"] == "Widget"
+    assert payload["orders"][0]["lines"][1]["line_type"] == "delivery"
+
+
+@pytest.mark.usefixtures("client")
+def test_csv_preview_route_accepts_portuguese_order_headers(client):
+    csv_text = "\n".join(
+        [
+            "Número do pedido,Nome do cliente,Buyer ID,Data do pedido,Data de entrega,Endereço de entrega,Nome do item,SKU,Quantidade,Preço,Total,IVA %",
+            "PED-1,Cliente Exemplo,B-1,2026-04-02,2026-04-03,Rua 1,Produto Exemplo,SKU-1,2,5.00,10.00,23",
+        ]
+    )
+
+    response = client.post(
+        "/api/unify/preview-csv",
+        content=csv_text.encode("utf-8"),
+        headers={"Content-Type": "text/csv; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_orders"] == 1
+    assert payload["orders"][0]["order_id"] == "PED-1"
+
+
+@pytest.mark.usefixtures("client")
+def test_csv_export_route_reuses_export_pipeline(client, monkeypatch, test_db):
+    csv_text = "\n".join(
+        [
+            "order_id,customer_name,buyer_id,order_date,delivery_date,delivery_address,item_name,item_sku,quantity,price,total,tax_percentage",
+            "CSV-2,Unify Customer,B-2,2026-04-02,2026-04-03,2 Main St,Widget,SKU-2,1,12.00,12.00,23",
+        ]
+    )
+
+    preview_response = client.post(
+        "/api/unify/preview-csv",
+        content=csv_text.encode("utf-8"),
+        headers={"Content-Type": "text/csv; charset=utf-8"},
+    )
+    assert preview_response.status_code == 200
+    preview_payload = preview_response.json()
+
+    class CsvZohoService:
+        async def find_contact_by_name(self, name):
+            return None
+
+        async def create_contact(self, name):
+            return "CONTACT-CSV-1"
+
+        async def get_contact_by_id(self, contact_id):
+            return {"contact": {"contact_id": contact_id, "contact_name": "Unify Customer"}}
+
+        async def update_contact_name(self, contact_id, name):
+            return True
+
+        async def find_item_by_name(self, name):
+            return None
+
+        async def create_item(self, name, rate, tax_id):
+            return "ITEM-CSV-1"
+
+        async def create_draft_invoice_from_payload(self, payload):
+            self.last_payload = payload
+            return "INV-CSV-1"
+
+    monkeypatch.setattr(ZohoService, "find_contact_by_name", CsvZohoService.find_contact_by_name)
+    monkeypatch.setattr(ZohoService, "create_contact", CsvZohoService.create_contact)
+    monkeypatch.setattr(ZohoService, "get_contact_by_id", CsvZohoService.get_contact_by_id)
+    monkeypatch.setattr(ZohoService, "update_contact_name", CsvZohoService.update_contact_name)
+    monkeypatch.setattr(ZohoService, "find_item_by_name", CsvZohoService.find_item_by_name)
+    monkeypatch.setattr(ZohoService, "create_item", CsvZohoService.create_item)
+    monkeypatch.setattr(ZohoService, "create_draft_invoice_from_payload", CsvZohoService.create_draft_invoice_from_payload)
+
+    response = client.post(
+        "/api/export/run-csv",
+        json={
+            "orders": preview_payload["orders"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "success"
+    assert payload["created"] == 1
+    assert payload["details"][0]["status"] == "created"
+    exported_orders = test_db.query(models.ExportedOrder).all()
+    assert len(exported_orders) == 1

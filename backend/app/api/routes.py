@@ -1,18 +1,21 @@
 import logging
 import re
 from datetime import datetime
+import json
 import traceback
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
-from typing import List
+from typing import Any, List
 
 from ..db import get_db
 from .. import models
 from ..schemas import (
     ConnectionTestResult,
+    CsvPreviewResponse,
+    ExportCsvRunRequest,
     ExportRunRequest,
     FetchOrdersRequest,
     FetchOrdersResponse,
@@ -23,6 +26,7 @@ from ..schemas import (
     SettingsResponse,
 )
 from ..services.unify_service import UnifyService, make_unify_service, UnifyServiceError
+from ..services import csv_parser
 from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
 from ..services.export_service import make_export_service, ExportService, ExportServiceError
 
@@ -124,6 +128,166 @@ def _settings_presence_snapshot(rows) -> dict:
         "blank_keys": blank_keys,
         "flags": flags,
     }
+
+
+def _customer_display_label(order: Any) -> str:
+    for candidate in (
+        getattr(order, "buyer_name", None),
+        getattr(order, "customer_name", None),
+        f"Customer {getattr(order, 'buyer_id', None)}" if getattr(order, "buyer_id", None) else None,
+        f"Customer {getattr(order, 'order_id', '')}",
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return f"Customer {getattr(order, 'order_id', 'unknown')}"
+
+
+def _build_preview_response_payload(orders, db: Session, debug_summary: dict | None = None, *, request_started_at: datetime | None = None, source: str = "unify") -> dict:
+    exported_order_ids = {
+        row[0]
+        for row in db.query(models.ExportedOrder.unify_order_id).all()
+    }
+
+    customer_info: dict[str, dict[str, float | int]] = {}
+    preview_count = len(orders)
+    ready_count = 0
+    blocked_in_range_count = 0
+
+    for order in orders:
+        order.already_exported = order.order_id in exported_order_ids
+        customer_key = _customer_display_label(order)
+        info = customer_info.setdefault(customer_key, {"order_count": 0, "total": 0.0})
+        info["order_count"] += 1
+        info["total"] += float(getattr(order, "total", 0.0) or 0.0)
+
+        if getattr(order, "preview_status", "ready") == "ready" and not order.already_exported:
+            ready_count += 1
+        elif not order.already_exported:
+            blocked_in_range_count += 1
+
+    summary = dict(debug_summary or {})
+    summary.update(
+        {
+            "source": source,
+            "preview_count": preview_count,
+            "raw_preview_count": preview_count,
+            "ready_count": ready_count,
+            "blocked_in_range_count": blocked_in_range_count,
+            "blocked_count": blocked_in_range_count,
+            "total_scanned_orders": summary.get("total_scanned_orders", summary.get("rawOrdersCount", preview_count)),
+            "total_in_range_orders": summary.get("total_in_range_orders", preview_count),
+            "dropped_out_of_range_count": summary.get("dropped_out_of_range_count", 0),
+            "missing_items_count": summary.get("missing_items_count", 0),
+            "item_fetch_failed_count": summary.get("item_fetch_failed_count", 0),
+            "mapping_issue_count": summary.get("mapping_issue_count", 0),
+            "detailFallbackCalls": summary.get("detailFallbackAttempts", summary.get("detailFallbackCalls", 0)),
+            "itemHydrationCalls": summary.get("itemHydrationCalls", 0),
+            "already_synced_count": len([order for order in orders if getattr(order, "already_exported", False)]),
+            "droppedOrders": summary.get("droppedOrders", []),
+        }
+    )
+    if request_started_at is not None:
+        summary["requestDurationSeconds"] = (datetime.utcnow() - request_started_at).total_seconds()
+    if "totalDurationSeconds" in summary and "totalDurationMs" not in summary:
+        summary["totalDurationMs"] = round(float(summary.get("totalDurationSeconds") or 0) * 1000, 2)
+
+    return {
+        "total_orders": preview_count,
+        "total_customers": len(customer_info),
+        "customers": customer_info,
+        "orders": orders,
+        "debug_summary": summary,
+    }
+
+
+async def _read_csv_payload(request: Request) -> str:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        preferred_keys = ("csv", "csv_file", "file", "upload", "content", "text", "csv_text")
+        for key in preferred_keys:
+            value = form.get(key)
+            if value is None:
+                continue
+            if _is_upload_file_value(value):
+                raw = await value.read()
+                text = raw.decode("utf-8-sig", errors="replace")
+                if text.strip():
+                    return text
+            if hasattr(value, "read") and callable(value.read):
+                raw = await value.read()
+                text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else str(raw)
+                if text.strip():
+                    return text
+            text = str(value)
+            if text.strip():
+                return text
+
+        for value in form.values():
+            if _is_upload_file_value(value):
+                raw = await value.read()
+                text = raw.decode("utf-8-sig", errors="replace")
+                if text.strip():
+                    return text
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is required")
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV content is required")
+
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(body.decode("utf-8-sig"))
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid JSON payload: {exc}") from exc
+        if isinstance(payload, dict):
+            for key in ("csv_text", "csv", "content", "text"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV content is required")
+
+    text = body.decode("utf-8-sig", errors="replace").strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV content is required")
+    return text
+
+
+def _is_upload_file_value(value: object) -> bool:
+    return hasattr(value, "filename") and callable(getattr(value, "read", None))
+
+
+def _parse_csv_export_date(value: str | None) -> str | None:
+    if not value or not str(value).strip():
+        return None
+    candidate = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(candidate, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return candidate
+
+
+def _derive_csv_export_range(orders: List[UnifyOrder], requested_date_from: str | None, requested_date_to: str | None) -> tuple[str, str]:
+    normalized_from = _parse_csv_export_date(requested_date_from)
+    normalized_to = _parse_csv_export_date(requested_date_to)
+    if normalized_from and normalized_to:
+        return normalized_from, normalized_to
+
+    candidates: List[str] = []
+    for order in orders:
+        for candidate in (order.order_date, order.delivery_date):
+            normalized = _parse_csv_export_date(candidate)
+            if normalized:
+                candidates.append(normalized)
+
+    if not normalized_from:
+        normalized_from = min(candidates) if candidates else datetime.utcnow().date().isoformat()
+    if not normalized_to:
+        normalized_to = max(candidates) if candidates else normalized_from
+
+    return normalized_from, normalized_to
 
 
 @router.get("/settings", response_model=SettingsResponse)
@@ -329,6 +493,77 @@ async def fetch_orders(request: FetchOrdersRequest, db: Session = Depends(get_db
         )
 
 
+@router.post("/unify/preview-csv", response_model=CsvPreviewResponse)
+async def preview_csv(request: Request, db: Session = Depends(get_db)):
+    try:
+        logger.info("Unify preview-csv route entered")
+        request_started_at = datetime.utcnow()
+
+        content_type = (request.headers.get("content-type") or "").lower()
+        file_bytes = None
+        filename = "upload.csv"
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            # find file field
+            for v in form.values():
+                if _is_upload_file_value(v):
+                    file_bytes = await v.read()
+                    filename = getattr(v, "filename", filename) or filename
+                    break
+            # fallback to text fields
+            if file_bytes is None:
+                csv_text = await _read_csv_payload(request)
+                file_bytes = csv_text.encode("utf-8")
+        else:
+            # raw body (text)
+            csv_text = await _read_csv_payload(request)
+            file_bytes = csv_text.encode("utf-8")
+
+        if not file_bytes:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is required")
+
+        try:
+            orders_list, parser_debug = csv_parser.parse_unify_file_bytes(file_bytes, filename)
+        except ValueError as ve:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve)) from ve
+        except RuntimeError as rexc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(rexc)) from rexc
+
+        # convert parsed dicts to UnifyOrder pydantic models
+        parsed_orders: List[UnifyOrder] = []
+        for o in orders_list:
+            try:
+                parsed = UnifyOrder.model_validate(o)
+            except Exception:
+                # best-effort fallback
+                parsed = UnifyOrder(**{
+                    "order_id": o.get("order_id"),
+                    "customer_name": o.get("customer_name"),
+                    "order_date": o.get("order_date", ""),
+                    "delivery_date": o.get("delivery_date", ""),
+                    "delivery_address": o.get("delivery_address"),
+                    "lines": o.get("lines", []),
+                    "total": o.get("total", 0.0),
+                })
+            parsed_orders.append(parsed)
+
+        preview_payload = _build_preview_response_payload(parsed_orders, db, dict(parser_debug or {}), request_started_at=request_started_at, source="csv")
+        response = CsvPreviewResponse(**preview_payload)
+        return JSONResponse(content=jsonable_encoder(response))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unify preview-csv failed")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": "CSV preview failed",
+                "details": str(e),
+                "trace": traceback.format_exc(),
+            },
+        )
+
+
 @router.get("/unify/order-preview/{order_id}")
 async def fetch_order_preview(order_id: str, db: Session = Depends(get_db)):
     try:
@@ -493,6 +728,66 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
             date_to,
             request.order_ids,
         )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": "Export failed",
+                "details": str(e),
+            },
+        )
+
+
+@router.post("/export/run-csv")
+async def run_export_csv(request: ExportCsvRunRequest, db: Session = Depends(get_db)):
+    logger.info("Unify export-run-csv route entered order_count=%s", len(request.orders))
+    if not request.orders:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="orders is required")
+
+    settings = {s.key: s.value for s in db.query(models.Setting).all()}
+    unify = UnifyService(
+        base_url=settings.get("UNIFY_BASE_URL", "https://api.unifyordering.com"),
+        client_id=settings.get("UNIFY_CLIENT_ID", ""),
+        client_secret=settings.get("UNIFY_CLIENT_SECRET", ""),
+    )
+    zoho = ZohoService(
+        base_url=settings.get("ZOHO_BASE_URL", "https://www.zohoapis.eu"),
+        client_id=settings.get("ZOHO_CLIENT_ID", ""),
+        client_secret=settings.get("ZOHO_CLIENT_SECRET", ""),
+        refresh_token=settings.get("ZOHO_REFRESH_TOKEN", ""),
+        org_id=settings.get("ZOHO_ORG_ID", ""),
+    )
+    export_service = make_export_service(unify, zoho)
+    date_from, date_to = _derive_csv_export_range(request.orders, request.date_from, request.date_to)
+    logger.info(
+        "Unify export-run-csv derived date range date_from=%s date_to=%s order_ids=%s",
+        date_from,
+        date_to,
+        [order.order_id for order in request.orders],
+    )
+
+    try:
+        result = await export_service.run_export(db, date_from, date_to, request.orders)
+        logger.info(
+            "Unify export-run-csv completed date_from=%s date_to=%s status=%s created=%s skipped=%s failed=%s",
+            date_from,
+            date_to,
+            result.get("status"),
+            result.get("created"),
+            result.get("skipped"),
+            result.get("failed"),
+        )
+        return result
+    except ExportServiceError as e:
+        logger.exception("Export run-csv failed date_from=%s date_to=%s", date_from, date_to)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "error": "Export failed",
+                "details": str(e),
+            },
+        )
+    except Exception as e:
+        logger.exception("Unexpected export-run-csv failure date_from=%s date_to=%s", date_from, date_to)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={

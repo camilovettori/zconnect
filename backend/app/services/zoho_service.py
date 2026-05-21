@@ -271,6 +271,9 @@ class ZohoService:
                     return str(item_id).strip()
         return None
 
+    async def find_item_by_sku(self, sku: str) -> Optional[str]:
+        return await self.find_item_by_name(sku)
+
     async def create_item(self, name: str, rate: float, tax_id: str) -> str:
         payload: Dict[str, Any] = {
             "name": name,
