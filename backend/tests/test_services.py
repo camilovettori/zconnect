@@ -362,6 +362,9 @@ async def test_export_service_run_export_success(monkeypatch):
         async def get_contact_by_id(self, contact_id):
             return {"contact": {"contact_id": contact_id, "contact_name": "Customer A"}}
 
+        async def get_contact_person_ids(self, contact_id):
+            return []
+
         async def update_contact_name(self, contact_id, name):
             return True
 
@@ -435,6 +438,9 @@ async def test_export_service_uses_item_id_when_zoho_item_is_found(monkeypatch):
 
         async def get_tax_by_rate(self, rate):
             return "tax-1"
+
+        async def get_contact_person_ids(self, contact_id):
+            return []
 
         async def create_draft_invoice_from_payload(self, payload):
             self.last_payload = payload
@@ -572,15 +578,9 @@ def test_build_invoice_notes_uses_standard_client_facing_format():
 
     assert export_svc.build_invoice_notes(with_storage) == (
         "Storage: Keep refrigerated\n\n"
-        "This is your delivery receipt and invoice. A weekly statement will be e-mailed to you. "
-        "Thank you for loving our cake! Caryna and the Lovin' from the Oven team\n"
         "VAT IE9802711J"
     )
-    assert export_svc.build_invoice_notes(without_storage) == (
-        "This is your delivery receipt and invoice. A weekly statement will be e-mailed to you. "
-        "Thank you for loving our cake! Caryna and the Lovin' from the Oven team\n"
-        "VAT IE9802711J"
-    )
+    assert export_svc.build_invoice_notes(without_storage) == "VAT IE9802711J"
 
 
 @pytest.mark.asyncio
@@ -598,6 +598,9 @@ async def test_export_service_repairs_numeric_legacy_contact_before_invoice(monk
 
         async def get_contact_by_id(self, contact_id):
             return {"contact": {"contact_id": contact_id, "contact_name": "317"}}
+
+        async def get_contact_person_ids(self, contact_id):
+            return []
 
         async def update_contact_name(self, contact_id, name):
             self.updated_contacts.append((contact_id, name))
@@ -641,11 +644,7 @@ async def test_export_service_repairs_numeric_legacy_contact_before_invoice(monk
     assert zoho_svc.updated_contacts == [("legacy-contact-1", "Gotham Cafe City")]
     assert zoho_svc.created_contacts == []
     assert zoho_svc.payload["customer_id"] == "legacy-contact-1"
-    assert zoho_svc.payload["notes"] == (
-        "This is your delivery receipt and invoice. A weekly statement will be e-mailed to you. "
-        "Thank you for loving our cake! Caryna and the Lovin' from the Oven team\n"
-        "VAT IE9802711J"
-    )
+    assert zoho_svc.payload["notes"] == "VAT IE9802711J"
 
 
 @pytest.mark.asyncio

@@ -44,7 +44,12 @@ BAKERY_TAX_KEYWORDS = (
     "pastries",
     "scone",
     "scones",
+    "biscoff",
+    "cinnamon roll",
+    "cream cheese frosting",
 )
+ZOHO_INVOICE_PAYMENT_GATEWAY_NAMES = ("stripe", "gocardless")
+
 EXEMPT_TAX_KEYWORDS = (
     "tax exempt",
     "tax-exempt",
@@ -553,11 +558,6 @@ class ExportService:
             lines.append(f"Storage: {storage_note}")
             lines.append("")
 
-        lines.append(
-            "This is your delivery receipt and invoice. "
-            "A weekly statement will be e-mailed to you. "
-            "Thank you for loving our cake! Caryna and the Lovin' from the Oven team"
-        )
         lines.append("VAT IE9802711J")
         return "\n".join(lines)
 
@@ -893,7 +893,7 @@ class ExportService:
         )
         return contact_id
 
-    def _build_draft_invoice_payload(self, order: UnifyOrder, contact_id: str, line_items: List[Dict[str, Any]], invoice_date: str, contact_name: str) -> Dict[str, Any]:
+    async def _build_draft_invoice_payload(self, order: UnifyOrder, contact_id: str, line_items: List[Dict[str, Any]], invoice_date: str, contact_name: str) -> Dict[str, Any]:
         payload = {
             "customer_id": contact_id,
             "reference_number": order.order_id,
@@ -902,7 +902,25 @@ class ExportService:
             "notes": self.build_invoice_notes(order),
             "is_inclusive_tax": False,
             "status": "draft",
+            "payment_options": {
+                "payment_gateways": [
+                    {"gateway_name": gateway_name, "configured": True}
+                    for gateway_name in ZOHO_INVOICE_PAYMENT_GATEWAY_NAMES
+                ]
+            },
         }
+
+        contact_person_ids = await self.zoho_service.get_contact_person_ids(contact_id)
+        if contact_person_ids:
+            payload["contact_persons"] = contact_person_ids
+        logger.info(
+            "Zoho invoice payment/contact options order_id=%s payment_gateways=%s contact_person_ids=%s "
+            "note=GoCardless is not in Zoho's officially documented invoice payment_gateway values; verify manually if it does not apply",
+            order.order_id,
+            ZOHO_INVOICE_PAYMENT_GATEWAY_NAMES,
+            contact_person_ids,
+        )
+
         logger.info(
             "Built Zoho draft invoice payload order_id=%s contact_name=%s customer_id=%s line_count=%s date=%s has_delivery_address=%s",
             order.order_id,
@@ -1098,7 +1116,7 @@ class ExportService:
                     continue
 
                 try:
-                    payload = self._build_draft_invoice_payload(
+                    payload = await self._build_draft_invoice_payload(
                         order,
                         contact_id,
                         line_items,

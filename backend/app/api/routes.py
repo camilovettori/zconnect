@@ -947,6 +947,23 @@ async def reset_sync_state(db: Session = Depends(get_db)):
         )
 
 
+@router.post("/export/reset-order/{order_id}", response_model=APIResponse)
+async def reset_order(order_id: str, db: Session = Depends(get_db)):
+    logger.warning("Export single-order reset requested order_id=%s", order_id)
+    exported_order = (
+        db.query(models.ExportedOrder)
+        .filter(models.ExportedOrder.unify_order_id == order_id)
+        .one_or_none()
+    )
+    if not exported_order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found in export history")
+
+    db.delete(exported_order)
+    db.commit()
+    logger.warning("Export single-order reset completed order_id=%s", order_id)
+    return APIResponse(ok=True, message="Order unsynced", data={"order_id": order_id})
+
+
 @router.post("/export/reset-selected-runs", response_model=ResetSelectedRunsResponse)
 async def reset_selected_runs(request: ResetSelectedRunsRequest, db: Session = Depends(get_db)):
     run_ids = list(dict.fromkeys(request.run_ids))

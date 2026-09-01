@@ -156,6 +156,9 @@ class ZohoService:
             return True
         raise ZohoServiceError(f"Zoho test connection failed {resp.status_code}: {resp.text}")
 
+    def _normalize_contact_name(self, value: Any) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
     async def find_contact_by_name(self, name: str) -> Optional[str]:
         resp = await self._request("GET", "/contacts", params={"contact_name": name, "per_page": 20})
         if resp.status_code != 200:
@@ -164,6 +167,17 @@ class ZohoService:
         data = resp.json().get("contacts", [])
         for c in data:
             if c.get("contact_name") == name:
+                return c.get("contact_id")
+
+        normalized_target = self._normalize_contact_name(name)
+        for c in data:
+            if self._normalize_contact_name(c.get("contact_name")) == normalized_target:
+                logger.info(
+                    "Zoho contact matched via normalized name fallback lookup_query=%s matched_contact_name=%s contact_id=%s",
+                    name,
+                    c.get("contact_name"),
+                    c.get("contact_id"),
+                )
                 return c.get("contact_id")
         return None
 
@@ -204,6 +218,23 @@ class ZohoService:
         except ValueError as exc:
             raise ZohoServiceError(f"Zoho get contact returned invalid JSON: {resp.text}") from exc
         return self._extract_contact_record(data)
+
+    async def get_contact_person_ids(self, contact_id: str) -> List[str]:
+        contact = await self.get_contact_by_id(contact_id)
+        if not isinstance(contact, dict):
+            return []
+        persons = contact.get("contact_persons")
+        if not isinstance(persons, list):
+            return []
+
+        ids: List[str] = []
+        for person in persons:
+            if not isinstance(person, dict):
+                continue
+            person_id = person.get("contact_person_id") or person.get("contactPersonId")
+            if person_id:
+                ids.append(str(person_id))
+        return ids
 
     async def update_contact_name(self, contact_id: str, name: str) -> bool:
         contact_key = (contact_id or "").strip()

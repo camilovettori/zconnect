@@ -1736,6 +1736,59 @@ class UnifyService:
                 continue
         return None
 
+    def _find_delivery_charge_entry(self, detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for value in detail.values():
+            if not isinstance(value, list):
+                continue
+            for entry in value:
+                if not isinstance(entry, dict):
+                    continue
+                label = " ".join(
+                    str(entry.get(field, ""))
+                    for field in ("name", "type", "label", "chargeType", "charge_type", "description")
+                ).lower()
+                if "delivery" in label or "shipping" in label:
+                    return entry
+        return None
+
+    def _resolve_delivery_fee(self, detail: Dict[str, Any], order_id: Optional[str] = None) -> tuple[float, Optional[float]]:
+        normalized_delivery_fee = self._to_major_currency(
+            detail.get("totalDeliveryFee")
+            or detail.get("total_delivery_fee")
+            or detail.get("deliveryFee")
+            or detail.get("delivery_fee")
+        )
+        if normalized_delivery_fee > 0:
+            delivery_tax = self._extract_tax_percentage(detail.get("deliveryFee") or detail.get("delivery_fee") or detail)
+            return normalized_delivery_fee, delivery_tax
+
+        charge_entry = self._find_delivery_charge_entry(detail)
+        if charge_entry:
+            normalized_delivery_fee = self._to_major_currency(
+                charge_entry.get("amount")
+                or charge_entry.get("value")
+                or charge_entry.get("total")
+                or charge_entry.get("netAmount")
+                or charge_entry.get("price")
+            )
+            delivery_tax = self._extract_tax_percentage(charge_entry)
+            logger.info(
+                "Unify delivery fee resolved from charges list order_id=%s charge_entry=%s normalized_delivery_fee=%s",
+                order_id,
+                charge_entry,
+                normalized_delivery_fee,
+            )
+            return normalized_delivery_fee, delivery_tax
+
+        if normalized_delivery_fee <= 0 and getattr(settings, "UNIFY_DEBUG_SHAPES", False):
+            logger.info(
+                "Unify order detail has no resolvable delivery fee order_id=%s detail_keys=%s detail=%s",
+                order_id,
+                sorted(detail.keys()),
+                self._safe_sample_value(detail),
+            )
+        return 0.0, None
+
     def _is_delivery_charge_item(self, item: Dict[str, Any]) -> bool:
         text = " ".join(
             str(value).lower()
@@ -1952,15 +2005,9 @@ class UnifyService:
         if normalized_order_total == 0.0:
             normalized_order_total = sum([line.quantity * line.price for line in rows])
         normalized_vat_total = self._to_major_currency(detail.get("totalVatAmount") or detail.get("total_vat_amount"))
-        normalized_delivery_fee = self._to_major_currency(
-            detail.get("totalDeliveryFee")
-            or detail.get("total_delivery_fee")
-            or detail.get("deliveryFee")
-            or detail.get("delivery_fee")
-        )
+        normalized_delivery_fee, delivery_tax = self._resolve_delivery_fee(detail, order_id=order.order_id)
         has_delivery_item = any(self._is_delivery_charge_item(item) for item in items)
         if normalized_delivery_fee > 0 and not has_delivery_item:
-            delivery_tax = self._extract_tax_percentage(detail.get("deliveryFee") or detail.get("delivery_fee") or detail)
             rows.append(
                 OrderLine(
                     item_sku="DELIVERY",
@@ -3083,15 +3130,9 @@ class UnifyService:
             if normalized_order_total == 0.0:
                 normalized_order_total = sum([l.quantity * l.price for l in rows])
             normalized_vat_total = self._to_major_currency(detail.get("totalVatAmount") or detail.get("total_vat_amount"))
-            normalized_delivery_fee = self._to_major_currency(
-                detail.get("totalDeliveryFee")
-                or detail.get("total_delivery_fee")
-                or detail.get("deliveryFee")
-                or detail.get("delivery_fee")
-            )
+            normalized_delivery_fee, delivery_tax = self._resolve_delivery_fee(detail, order_id=order_id)
             has_delivery_item = any(self._is_delivery_charge_item(item) for item in items)
             if normalized_delivery_fee > 0 and not has_delivery_item:
-                delivery_tax = self._extract_tax_percentage(detail.get("deliveryFee") or detail.get("delivery_fee") or detail)
                 rows.append(
                     OrderLine(
                         item_sku="DELIVERY",
