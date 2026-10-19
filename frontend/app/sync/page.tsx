@@ -475,7 +475,7 @@ export default function SyncPage() {
       ? `Preview ready with ${orders.length} order${orders.length === 1 ? "" : "s"}.`
       : csvFileName
         ? "File selected. You can replace it or clear the preview."
-        : "Upload a Unify report to preview and sync orders without using the date-based fetch.";
+        : "Upload a Unify report to preview the orders before syncing them to Zoho.";
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -1030,43 +1030,29 @@ export default function SyncPage() {
     <AppShell>
       <main className="space-y-8">
       <section className="space-y-8">
-        <div className="rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)] backdrop-blur">
-          <div className="flex flex-col gap-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Sync workspace</p>
-            <h2 className="text-3xl font-semibold tracking-tight text-slate-950">Invoice automation for Unify {"->"} Zoho</h2>
-            <p className="max-w-3xl text-sm leading-6 text-slate-600">
-              Fetch orders, review the invoice preview, and sync each Unify order into its own Zoho draft invoice.
-            </p>
-          </div>
-
-          <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <DatePickerField label="Date From" value={dateFrom} onSelect={updateFromDate} />
-            <DatePickerField label="Date To" value={dateTo} initialMonth={dateFrom ?? undefined} onSelect={updateToDate} />
-            <div className="flex items-end">
-              <button
-                className="w-full rounded-xl bg-slate-950 px-4 py-2.5 font-medium text-white shadow-[0_12px_24px_-16px_rgba(15,23,42,0.9)] transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={fetchOrders}
-                disabled={loading}
-              >
-                {loading ? "Working..." : "Fetch orders"}
-              </button>
+        <div className="rounded-3xl border border-slate-200/80 bg-white/90 p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)] backdrop-blur sm:p-8">
+          <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+            <div className="max-w-3xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Sync workspace</p>
+              <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Import orders and create Zoho invoices</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-600">
+                Upload a Unify CSV or Excel report to review orders before syncing them to Zoho.
+              </p>
             </div>
-            <div className="flex items-end">
-              <button
-                className="w-full rounded-xl bg-emerald-600 px-4 py-2.5 font-medium text-white shadow-[0_12px_24px_-16px_rgba(16,185,129,0.9)] transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => requestExport()}
-                disabled={loading || selectedReadyCount === 0}
-              >
-                {loading ? "Working..." : "Sync selected orders"}
-              </button>
+
+            <div className="flex flex-wrap gap-2 text-xs font-medium text-slate-500">
+              <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 shadow-sm">Upload file</span>
+              <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 shadow-sm">Review orders</span>
+              <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 shadow-sm">Select orders</span>
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-emerald-700 shadow-sm">Sync to Zoho</span>
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+          <div className="mt-8">
             <section
               className={[
-                "relative overflow-hidden rounded-3xl border bg-white/95 shadow-[0_18px_50px_-32px_rgba(15,23,42,0.32)] transition",
-                csvDragActive ? "border-emerald-300 ring-4 ring-emerald-100/70" : "border-slate-200",
+                "relative overflow-hidden rounded-3xl border bg-white/95 shadow-[0_24px_70px_-40px_rgba(15,23,42,0.42)] transition",
+                csvDragActive ? "border-emerald-300 ring-4 ring-emerald-100/70" : "border-slate-200/90",
               ].join(" ")}
               onDragEnter={(event) => {
                 event.preventDefault();
@@ -1096,7 +1082,7 @@ export default function SyncPage() {
                 }
               }}
             >
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(16,185,129,0.12),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.9)_0%,rgba(248,250,252,0.96)_100%)]" />
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(16,185,129,0.10),transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.92)_0%,rgba(248,250,252,0.98)_100%)]" />
               <input
                 ref={csvInputRef}
                 type="file"
@@ -1110,62 +1096,42 @@ export default function SyncPage() {
                 }}
               />
 
-              <div className="relative p-6 sm:p-7">
+              <div className="relative p-5 sm:p-7">
                 <div className="flex flex-col gap-5">
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                    <div className="max-w-2xl">
-                      <span
-                        className={[
-                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]",
-                          activeSource === "csv"
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 shadow-sm">
+                      Supports .csv, .xlsx, .xls
+                    </span>
+                    <span
+                      className={[
+                        "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]",
+                        csvUploadSucceeded
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                          : csvLoading
+                            ? "border-amber-200 bg-amber-50 text-amber-700"
                             : "border-slate-200 bg-white text-slate-500",
-                        ].join(" ")}
-                      >
-                        {activeSource === "csv" ? "CSV active" : "Optional"}
-                      </span>
-                      <h3 className="mt-3 text-xl font-semibold tracking-tight text-slate-950">Upload CSV or Excel</h3>
-                      <p className="mt-2 max-w-xl text-sm leading-6 text-slate-600">
-                        Upload a Unify report to preview and sync orders without using the date-based fetch.
-                      </p>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500 shadow-sm">
-                        Supports .csv, .xlsx, .xls
-                      </span>
-                      <span
-                        className={[
-                          "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em]",
-                          csvUploadSucceeded
-                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                            : csvLoading
-                              ? "border-amber-200 bg-amber-50 text-amber-700"
-                              : "border-slate-200 bg-white text-slate-500",
-                        ].join(" ")}
-                      >
-                        {csvLoading ? "Processing" : csvUploadSucceeded ? "Parsed" : "Ready"}
-                      </span>
-                    </div>
+                      ].join(" ")}
+                    >
+                      {csvLoading ? "Processing" : csvUploadSucceeded ? "Preview ready" : "Ready to import"}
+                    </span>
                   </div>
 
                   <div
                     className={[
-                      "rounded-3xl border border-dashed p-6 shadow-sm transition sm:p-7",
+                      "rounded-3xl border border-dashed p-7 shadow-sm transition sm:p-10",
                       csvDragActive
                         ? "border-emerald-300 bg-emerald-50/80 shadow-[0_16px_35px_-26px_rgba(16,185,129,0.35)]"
                         : csvLoading
                           ? "border-emerald-200 bg-white/90"
                           : csvUploadSucceeded
                             ? "border-emerald-200 bg-emerald-50/60"
-                            : "border-slate-200 bg-white/95",
+                            : "border-slate-200 bg-white/95 hover:border-slate-300 hover:bg-white",
                     ].join(" ")}
                   >
-                    <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="flex items-start gap-4">
+                    <div className="flex flex-col items-center gap-5 text-center">
                         <div
                           className={[
-                            "flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border shadow-sm transition",
+                            "flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border shadow-sm transition",
                             csvDragActive
                               ? "border-emerald-200 bg-emerald-600 text-white"
                               : csvUploadSucceeded
@@ -1175,32 +1141,18 @@ export default function SyncPage() {
                         >
                           <UploadCloudIcon />
                         </div>
-                        <div className="min-w-0 space-y-2">
-                          <p className="text-base font-semibold tracking-tight text-slate-950">
+                        <div className="mx-auto max-w-2xl space-y-2">
+                          <p className="text-xl font-semibold tracking-tight text-slate-950">
                             {csvLoading
                               ? "Parsing file..."
                               : csvFileName
                                 ? "Drop a new file to replace the current preview"
-                                : "Drag and drop your file here"}
+                                : "Drop your Unify report here"}
                           </p>
-                          <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                            {csvUploadHelperState}
-                          </p>
-                          <div className="flex flex-wrap gap-2 pt-1 text-xs text-slate-500">
-                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
-                              Fast preview
-                            </span>
-                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
-                              Same export pipeline
-                            </span>
-                            <span className="inline-flex items-center rounded-full border border-white/70 bg-white/90 px-3 py-1 font-medium shadow-sm">
-                              No date fetch required
-                            </span>
-                          </div>
+                          <p className="text-sm leading-6 text-slate-600">{csvUploadHelperState}</p>
                         </div>
-                      </div>
 
-                      <div className="flex flex-col gap-3 sm:items-end">
+                      <div className="flex flex-col items-center gap-3">
                         <button
                           type="button"
                           className="inline-flex items-center justify-center rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-[0_12px_28px_-18px_rgba(15,23,42,0.95)] transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1238,56 +1190,46 @@ export default function SyncPage() {
                     )}
 
                     {csvFileName && !csvLoading && (
-                      <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_auto]">
-                        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                          <div className="flex items-center gap-2">
+                      <div className="mt-5 rounded-2xl border border-emerald-200 bg-white px-4 py-3 shadow-sm">
+                        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 text-emerald-700">
                             <DocumentIcon />
-                            <span className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Selected file</span>
+                              <span className="text-xs font-semibold uppercase tracking-[0.22em]">File loaded</span>
+                            </div>
+                            <div className="mt-2 truncate text-sm font-semibold text-slate-950">{csvFileName}</div>
                           </div>
-                          <div className="mt-2 truncate text-sm font-semibold text-slate-950">{csvFileName}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold tracking-[0.14em] text-slate-700">
-                              {csvFileExtension}
-                            </span>
-                            <span>{csvUploadSucceeded ? "Parsed successfully and ready to sync." : "Queued for preview."}</span>
+
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 font-semibold tracking-[0.14em] text-slate-700">{csvFileExtension}</span>
+                            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">{previewOrderCount} order{previewOrderCount === 1 ? "" : "s"} loaded</span>
+                            <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">{formatCurrencyEur(totalRevenue)}</span>
                           </div>
-                        </div>
 
-                        <div className="flex flex-wrap gap-2 lg:justify-end">
-                          <button
-                            type="button"
-                            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              openCsvPicker();
-                            }}
-                            disabled={loading || csvLoading}
-                          >
-                            Replace file
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              clearLoadedState();
-                              setMessage("CSV preview cleared");
-                            }}
-                            disabled={loading || csvLoading || orders.length === 0}
-                          >
-                            Clear preview
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {csvUploadSucceeded && (
-                      <div className="mt-5 flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                        <CheckBadgeIcon />
-                        <div>
-                          <div className="font-medium">Preview generated successfully</div>
-                          <div className="mt-1 text-emerald-700">
-                            You can review the orders below, sync now, or replace the file at any time.
+                          <div className="flex flex-wrap gap-2 lg:justify-end">
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                openCsvPicker();
+                              }}
+                              disabled={loading || csvLoading}
+                            >
+                              Replace file
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                clearLoadedState();
+                                setMessage("CSV preview cleared");
+                              }}
+                              disabled={loading || csvLoading || orders.length === 0}
+                            >
+                              Clear preview
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -1306,38 +1248,29 @@ export default function SyncPage() {
                 </div>
               </div>
             </section>
+          </div>
 
-            <aside className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Mode</div>
-                  <div className="mt-2 text-lg font-semibold tracking-tight text-slate-950">Choose your source</div>
-                </div>
-                {activeSource === "csv" ? (
-                  <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-700">
-                    CSV active
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    Date sync active
-                  </span>
-                )}
+          <div className="mt-6 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/85 p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-slate-950">
+                {previewOrderCount > 0 ? `${selectedReadyCount} selected order${selectedReadyCount === 1 ? "" : "s"} ready` : "Orders will appear after upload"}
               </div>
-
-              <div className="mt-4 space-y-3 text-sm leading-6 text-slate-600">
-                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <div className="font-medium text-slate-950">Date-based fetch</div>
-                  <div className="mt-1">Use the Unify API flow to fetch orders by delivery date as usual.</div>
-                </div>
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                  <div className="font-medium text-emerald-950">CSV / Excel upload</div>
-                  <div className="mt-1 text-emerald-800">
-                    Upload a report to preview and sync the same invoices without running the date fetch.
-                  </div>
-                </div>
+              <div className="mt-1 text-sm text-slate-500">
+                {previewOrderCount > 0 ? "Review the preview below, select the orders you want, then sync to Zoho." : "Upload a Unify report to enable Zoho syncing."}
               </div>
-
-            </aside>
+            </div>
+            <button
+              className={[
+                "w-full rounded-xl px-4 py-2.5 font-medium transition disabled:cursor-not-allowed sm:w-auto",
+                previewOrderCount > 0
+                  ? "bg-emerald-600 text-white shadow-[0_12px_24px_-16px_rgba(16,185,129,0.9)] hover:bg-emerald-500 disabled:opacity-60"
+                  : "border border-slate-300 bg-white text-slate-500 shadow-sm disabled:opacity-70",
+              ].join(" ")}
+              onClick={() => requestExport()}
+              disabled={loading || selectedReadyCount === 0}
+            >
+              {loading ? "Working..." : "Sync selected orders"}
+            </button>
           </div>
 
           {message && (
@@ -1398,7 +1331,7 @@ export default function SyncPage() {
               <div>
                 <h3 className="text-lg font-semibold tracking-tight text-slate-950">Selection</h3>
                 <p className="text-sm text-slate-500">
-                  {previewOrderCount} fetched orders, {selectedOrderIds.size} selected, {exportedCount} Synced
+                  {previewOrderCount} preview orders, {selectedOrderIds.size} selected, {exportedCount} Synced
                 </p>
                 {lastFetchedRange && (
                   <p className="mt-1 text-xs text-slate-400">

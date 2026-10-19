@@ -34,7 +34,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <BrandLogo width={44} height={44} />
               <div>
                 <div className="text-lg font-semibold tracking-tight text-slate-950">Zconnect</div>
-                <div className="text-xs text-slate-500">Invoice automation for Unify {"->"} Zoho</div>
+                <div className="text-xs text-slate-500">Invoice automation to Zoho</div>
               </div>
             </Link>
 

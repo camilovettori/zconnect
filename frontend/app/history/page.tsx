@@ -50,6 +50,8 @@ type ResetResponseData = {
   updated_sync_runs?: number;
 };
 
+type HistoryResponse = HistoryItem[] | { data?: unknown };
+
 const SYNC_RESET_SIGNAL_KEY = "zconnect:last-selected-run-reset-at";
 
 const statusStyles: Record<string, string> = {
@@ -152,6 +154,14 @@ function formatResetNotice(data: ResetResponseData, requestedCount: number) {
   return `${headline}. Removed ${pluralize(deletedOrders, "order record")} and ${pluralize(deletedInvoices, "invoice record")}. ${missingMessage}.`;
 }
 
+function normalizeHistoryResponse(data: HistoryResponse): HistoryItem[] {
+  if (Array.isArray(data)) {
+    return data;
+  }
+
+  return Array.isArray(data.data) ? data.data : [];
+}
+
 function StatusBadge({ status }: { status: string }) {
   const classes = statusStyles[status] ?? "border-slate-200 bg-slate-100 text-slate-600";
   return (
@@ -243,9 +253,13 @@ export default function HistoryPage() {
 
   const fetchHistory = async () => {
     const res = await fetch("/api/export/history");
-    const data = (await res.json()) as HistoryItem[];
-    setHistory(data);
-    return data;
+    const data = (await res.json()) as HistoryResponse;
+    if (!res.ok) {
+      throw new Error(cleanMessage(data) || "Unable to load export history.");
+    }
+    const historyItems = normalizeHistoryResponse(data);
+    setHistory(historyItems);
+    return historyItems;
   };
 
   useEffect(() => {
@@ -280,7 +294,7 @@ export default function HistoryPage() {
   };
 
   const selectedRun = useMemo(
-    () => detail?.sync_run ?? history.find((item) => item.id === selectedDetailId) ?? null,
+    () => detail?.sync_run ?? (Array.isArray(history) ? history.find((item) => item.id === selectedDetailId) ?? null : null),
     [detail, history, selectedDetailId],
   );
 
