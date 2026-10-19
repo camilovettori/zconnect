@@ -248,6 +248,7 @@ export default function HistoryPage() {
   const [runQuery, setRunQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const detailPanelRef = useRef<HTMLElement | null>(null);
+  const latestDetailRequestRef = useRef(0);
 
   const fetchHistory = async () => {
     const res = await fetch("/api/export/history");
@@ -280,14 +281,28 @@ export default function HistoryPage() {
   }, []);
 
   const loadDetail = async (id: number) => {
+    latestDetailRequestRef.current += 1;
+    const requestId = latestDetailRequestRef.current;
+    const isLatest = () => latestDetailRequestRef.current === requestId;
     setSelectedDetailId(id);
     setDetailLoading(true);
     try {
       const res = await fetch(`/api/export/history/${id}`);
       const data = (await res.json()) as HistoryDetail;
-      setDetail(data);
+      if (isLatest()) {
+        // Error payloads (e.g. 404 { detail }) are not run details; keep no stale detail.
+        setDetail(res.ok ? data : null);
+      }
+    } catch (error) {
+      // Network or parse failure: show the run from the list without stale details.
+      console.error("[History] Run detail request failed", { id, error });
+      if (isLatest()) {
+        setDetail(null);
+      }
     } finally {
-      setDetailLoading(false);
+      if (isLatest()) {
+        setDetailLoading(false);
+      }
     }
   };
 

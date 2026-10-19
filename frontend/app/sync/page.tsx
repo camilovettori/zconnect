@@ -1026,9 +1026,22 @@ export default function SyncPage() {
     }
   };
 
+  // Only orders whose effective status (getOrderStatus) is "ready" may be submitted.
+  const getEligibleSyncOrderIds = (orderIds: string[]) =>
+    orderIds.filter((orderId) => {
+      const order = orders.find((candidate) => candidate.order_id === orderId);
+      return order !== undefined && getOrderStatus(order) === "ready";
+    });
+
   const executeExport = async (orderIds: string[], actionLabel = "sync-selected-orders") => {
     if (!orderIds.length) {
       setMessage("Select at least one order to sync");
+      return;
+    }
+    // Request-level guard: never submit an order that is no longer eligible, and never
+    // send a different set than the one the user confirmed.
+    if (getEligibleSyncOrderIds(orderIds).length !== orderIds.length) {
+      setMessage("Error: Some of the confirmed orders are no longer ready to sync. Review the selection and try again.");
       return;
     }
 
@@ -1114,9 +1127,10 @@ export default function SyncPage() {
   };
 
   const requestExport = (orderIds?: string[]) => {
-    const syncIds = orderIds ?? Array.from(selectedOrderIds);
+    const requestedIds = orderIds ?? Array.from(selectedOrderIds);
+    const syncIds = getEligibleSyncOrderIds(requestedIds);
     if (!syncIds.length) {
-      setMessage("Select at least one order to sync");
+      setMessage(requestedIds.length ? "None of the selected orders are ready to sync" : "Select at least one order to sync");
       return;
     }
     setPendingSyncOrderIds(syncIds);
@@ -1150,7 +1164,9 @@ export default function SyncPage() {
   const blockedInRangePreviewCount = orders.filter((order) => !syncablePreviewStatuses.has(order.preview_status ?? "")).length;
 
   // Presentation-only values derived from existing state; no workflow logic.
-  const selectionSummary = getSyncSummary(Array.from(selectedOrderIds));
+  // The bar shows exactly what a bulk sync would submit (eligible selected orders only).
+  const selectionSummary = getSyncSummary(getEligibleSyncOrderIds(Array.from(selectedOrderIds)));
+  const ineligibleSelectedCount = selectedOrderIds.size - selectedReadyCount;
   const hasOrders = orders.length > 0;
   const workflowStepStates: StepState[] = [
     hasOrders ? "complete" : "current",
@@ -1625,11 +1641,16 @@ export default function SyncPage() {
               <div className="min-w-0" aria-live="polite">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
                   <span className="text-sm font-semibold tabular-nums text-slate-950">
-                    {selectedOrderIds.size} of {previewOrderCount} selected
+                    {selectedReadyCount} of {previewOrderCount} selected
                   </span>
                   <span className="text-sm tabular-nums text-slate-600">
                     <span className="font-medium text-slate-900">{formatCurrencyEur(selectionSummary.total)}</span> excl. VAT
                   </span>
+                  {ineligibleSelectedCount > 0 && (
+                    <span className="text-xs font-medium text-amber-700">
+                      {ineligibleSelectedCount} selected order{ineligibleSelectedCount === 1 ? " is" : "s are"} not ready and won&apos;t be synced
+                    </span>
+                  )}
                 </div>
                 {lastFetchedRange && (
                   <p className="mt-0.5 text-xs text-slate-400">
