@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AppShell } from "../../components/app-shell";
+import { Modal } from "../../components/ui/modal";
+import { PageHeader } from "../../components/ui/page-header";
+import { StatusBadge } from "../../components/ui/status-badge";
+import type { StatusTone } from "../../components/ui/status-badge";
 
 type HistoryItem = {
   id: number;
@@ -54,18 +58,38 @@ type HistoryResponse = HistoryItem[] | { data?: unknown };
 
 const SYNC_RESET_SIGNAL_KEY = "zconnect:last-selected-run-reset-at";
 
-const statusStyles: Record<string, string> = {
-  success: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  partial: "border-amber-200 bg-amber-50 text-amber-800",
-  failed: "border-rose-200 bg-rose-50 text-rose-700",
-  running: "border-sky-200 bg-sky-50 text-sky-700",
-  pending: "border-slate-200 bg-slate-100 text-slate-600",
-  not_synced: "border-slate-200 bg-slate-100 text-slate-600",
+// Visual tone per stored status value (display only).
+const STATUS_TONES: Record<string, StatusTone> = {
+  success: "synced",
+  exported: "synced",
+  created: "synced",
+  partial: "review",
+  failed: "failed",
+  running: "running",
+  skipped: "blocked",
+  pending: "neutral",
+  not_synced: "neutral",
 };
+
+// Filter chip order; statuses not listed here follow alphabetically.
+const STATUS_FILTER_ORDER = ["success", "partial", "failed", "running", "pending", "not_synced"];
+
+const BUTTON_SHAPE =
+  "inline-flex items-center justify-center whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-medium transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-50";
+const BUTTON_SECONDARY = `${BUTTON_SHAPE} border border-slate-200 bg-white text-slate-700 shadow-card hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950`;
+const BUTTON_GHOST = `${BUTTON_SHAPE} text-slate-600 hover:bg-slate-100 hover:text-slate-950 disabled:hover:bg-transparent`;
+const BUTTON_DANGER = `${BUTTON_SHAPE} border border-rose-200 bg-white text-rose-700 shadow-card hover:border-rose-300 hover:bg-rose-50 disabled:hover:bg-white`;
+const BUTTON_DANGER_SOLID = `${BUTTON_SHAPE} bg-rose-600 text-white shadow-card hover:bg-rose-700 disabled:hover:bg-rose-600`;
 
 const dateTimeFormatter = new Intl.DateTimeFormat("en-GB", {
   dateStyle: "medium",
   timeStyle: "short",
+});
+
+const plainDateFormatter = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
 });
 
 function formatHistoryStatusLabel(value: string) {
@@ -93,6 +117,31 @@ function formatDateTime(value: string | null | undefined) {
   }
 
   return dateTimeFormatter.format(parsed);
+}
+
+// Formats plain YYYY-MM-DD values for display; anything else is shown as received.
+function formatPlainDate(value: unknown) {
+  if (typeof value !== "string") {
+    return value == null ? "" : String(value);
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) {
+    return value;
+  }
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? value : plainDateFormatter.format(date);
+}
+
+function formatPeriod(from: unknown, to: unknown) {
+  const start = formatPlainDate(from);
+  const end = formatPlainDate(to);
+  if (!start && !end) {
+    return "—";
+  }
+  if (!end || start === end) {
+    return start || end;
+  }
+  return `${start} – ${end}`;
 }
 
 function pluralize(count: number, singular: string) {
@@ -162,80 +211,25 @@ function normalizeHistoryResponse(data: HistoryResponse): HistoryItem[] {
   return Array.isArray(data.data) ? data.data : [];
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const classes = statusStyles[status] ?? "border-slate-200 bg-slate-100 text-slate-600";
-  return (
-    <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] ${classes}`}>
-      {formatHistoryStatusLabel(status)}
-    </span>
-  );
+function HistoryStatusBadge({ status }: { status: string }) {
+  const key = typeof status === "string" ? status.toLowerCase() : "";
+  return <StatusBadge tone={STATUS_TONES[key] ?? "neutral"}>{key ? formatHistoryStatusLabel(status) : "Unknown"}</StatusBadge>;
 }
 
-function SectionCard({
-  title,
-  children,
-  action,
-}: {
-  title: string;
-  children: ReactNode;
-  action?: ReactNode;
-}) {
+function SummaryField({ label, value, wide = false }: { label: string; value: ReactNode; wide?: boolean }) {
   return (
-    <section className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
-      <div className="mb-5 flex items-center justify-between gap-3">
-        <div>
-          <h3 className="text-lg font-semibold tracking-tight text-slate-950">{title}</h3>
-        </div>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function SummaryField({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-      <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">{label}</div>
-      <div className="mt-2 text-sm font-medium text-slate-950">{value}</div>
+    <div className={["min-w-0 px-4 py-3", wide ? "col-span-2" : ""].join(" ")}>
+      <dt className="text-xs font-medium text-slate-500">{label}</dt>
+      <dd className="mt-1 break-words text-sm font-medium tabular-nums text-slate-950">{value}</dd>
     </div>
   );
 }
 
-function Modal({
-  open,
-  title,
-  children,
-  actions,
-  onClose,
-}: {
-  open: boolean;
-  title: string;
-  children: ReactNode;
-  actions: ReactNode;
-  onClose: () => void;
-}) {
-  if (!open) {
-    return null;
-  }
-
+function SearchIcon() {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_30px_80px_-24px_rgba(15,23,42,0.5)]">
-        <div className="flex items-start justify-between gap-4">
-          <h3 className="text-xl font-semibold tracking-tight text-slate-950">{title}</h3>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
-            onClick={onClose}
-          >
-            Close
-          </button>
-        </div>
-        <div className="mt-4 text-sm leading-6 text-slate-600">{children}</div>
-        <div className="mt-6 flex flex-wrap justify-end gap-3">{actions}</div>
-      </div>
-    </div>
+    <svg viewBox="0 0 20 20" aria-hidden="true" className="h-4 w-4">
+      <path d="m14.5 14.5 3 3M16 9A7 7 0 1 1 2 9a7 7 0 0 1 14 0Z" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" />
+    </svg>
   );
 }
 
@@ -250,6 +244,10 @@ export default function HistoryPage() {
   const [resetting, setResetting] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [pendingResetRunIds, setPendingResetRunIds] = useState<number[]>([]);
+  // Presentation-only state: client-side search and status filter over already-loaded runs.
+  const [runQuery, setRunQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const detailPanelRef = useRef<HTMLElement | null>(null);
 
   const fetchHistory = async () => {
     const res = await fetch("/api/export/history");
@@ -391,197 +389,452 @@ export default function HistoryPage() {
     }
   };
 
+  // Presentation-only values derived from existing state; no API or reset logic.
+  const normalizedQuery = runQuery.trim().replace(/^#/, "");
+  const statusCounts = history.reduce<Record<string, number>>((acc, item) => {
+    const key = String(item.status || "").toLowerCase();
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
+  const statusOptions = Object.keys(statusCounts).sort(
+    (a, b) => (STATUS_FILTER_ORDER.indexOf(a) + 1 || 99) - (STATUS_FILTER_ORDER.indexOf(b) + 1 || 99) || a.localeCompare(b),
+  );
+  const filteredHistory = history.filter(
+    (item) =>
+      (statusFilter === "all" || String(item.status || "").toLowerCase() === statusFilter) &&
+      (!normalizedQuery || String(item.id).includes(normalizedQuery)),
+  );
+  const filtersActive = statusFilter !== "all" || normalizedQuery.length > 0;
+  const allFilteredSelected = filteredHistory.length > 0 && filteredHistory.every((item) => selectedRunIds.has(item.id));
+  const hiddenSelectedCount = Array.from(selectedRunIds).filter((id) => !filteredHistory.some((item) => item.id === id)).length;
+  // Only use a loaded detail payload when it belongs to the run being shown.
+  const detailForSelected = detail && detail.sync_run?.id === selectedDetailId ? detail : null;
+  const displayedRun = detailForSelected?.sync_run ?? history.find((item) => item.id === selectedDetailId) ?? null;
+  const displayedErrorText = cleanMessage(displayedRun?.errors);
+  const detailOrders = Array.isArray(detailForSelected?.orders) ? detailForSelected.orders : [];
+  const detailInvoices = Array.isArray(detailForSelected?.invoices) ? detailForSelected.invoices : [];
+
+  const selectFiltered = () => {
+    setSelectedRunIds(new Set([...Array.from(selectedRunIds), ...filteredHistory.map((item) => item.id)]));
+  };
+
+  const viewRun = (id: number) => {
+    void loadDetail(id);
+    if (window.matchMedia("(max-width: 1279px)").matches) {
+      detailPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  };
+
+  const clearFilters = () => {
+    setRunQuery("");
+    setStatusFilter("all");
+  };
+
   return (
     <AppShell>
-      <main className="space-y-8">
-      <section className="rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)] backdrop-blur">
-        <div className="flex flex-col gap-2">
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Export history</p>
-          <h2 className="text-3xl font-semibold tracking-tight text-slate-950">Sync history and run summaries</h2>
-          <p className="max-w-3xl text-sm leading-6 text-slate-600">
-            Review previous export runs, inspect a clean summary, and reset selected runs without exposing technical payloads.
-          </p>
-        </div>
-      </section>
+      <main className="space-y-6">
+        <PageHeader
+          eyebrow="History"
+          title="Sync history"
+          description="Review previous sync runs, inspect the orders and invoices they produced, and reset runs so their orders can be synced again."
+        />
 
-      {notice && (
-        <div
-          className={[
-            "rounded-2xl border px-4 py-3 text-sm",
-            notice.kind === "success"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-              : "border-rose-200 bg-rose-50 text-rose-700",
-          ].join(" ")}
-        >
-          {notice.text}
-        </div>
-      )}
+        {notice && (
+          <div
+            role={notice.kind === "error" ? "alert" : "status"}
+            className={[
+              "rounded-xl border px-4 py-3 text-sm",
+              notice.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-700",
+            ].join(" ")}
+          >
+            {notice.text}
+          </div>
+        )}
 
-      <div className="grid gap-6 xl:grid-cols-[1.6fr_1fr]">
-        <SectionCard
-          title="Export runs"
-          action={
-            <div className="flex items-center gap-3">
-              <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium uppercase tracking-[0.16em] text-slate-500">
-                {selectedCount} selected
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] xl:items-start">
+          <section aria-labelledby="runs-heading" className="min-w-0 rounded-2xl border border-slate-200/80 bg-white shadow-card">
+            <div className="space-y-4 border-b border-slate-200/80 p-4 sm:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 id="runs-heading" className="text-base font-semibold tracking-tight text-slate-950">
+                  Sync runs
+                  {!loading && (
+                    <span className="ml-2 text-sm font-normal tabular-nums text-slate-500">
+                      {filtersActive ? `${filteredHistory.length} of ${history.length}` : history.length}
+                    </span>
+                  )}
+                </h2>
+                <label className="relative block w-full sm:w-56">
+                  <span className="sr-only">Search by run ID</span>
+                  <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-slate-400">
+                    <SearchIcon />
+                  </span>
+                  <input
+                    type="search"
+                    inputMode="numeric"
+                    value={runQuery}
+                    onChange={(event) => setRunQuery(event.target.value)}
+                    placeholder="Search run ID"
+                    className="h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-900 shadow-card placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-100"
+                  />
+                </label>
               </div>
-              <button
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={selectAllVisible}
-                disabled={loading || history.length === 0 || allVisibleSelected}
-              >
-                Select all visible
-              </button>
-              <button
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={clearSelection}
-                disabled={loading || selectedCount === 0}
-              >
-                Clear selection
-              </button>
-              <button
-                className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-[0_12px_24px_-16px_rgba(15,23,42,0.9)] transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={openResetConfirmation}
-                disabled={loading || resetting || selectedCount === 0}
-              >
-                Reset selected
-              </button>
-            </div>
-          }
-        >
-          {loading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map((item) => (
-                <div key={item} className="h-16 animate-pulse rounded-2xl bg-slate-100" />
-              ))}
-            </div>
-          ) : (
-            <div className="overflow-hidden rounded-2xl border border-slate-200">
-              <table className="w-full text-left">
-                <thead className="bg-slate-50 text-xs uppercase tracking-[0.2em] text-slate-500">
-                  <tr>
-                    <th className="w-16 px-4 py-3 font-semibold">Select</th>
-                    <th className="px-4 py-3 font-semibold">Run</th>
-                    <th className="px-4 py-3 font-semibold">Period</th>
-                    <th className="px-4 py-3 font-semibold">Status</th>
-                    <th className="px-4 py-3 font-semibold">Invoices</th>
-                    <th className="px-4 py-3 font-semibold">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {history.map((item) => {
-                    const isSelected = selectedRunIds.has(item.id);
+
+              {statusOptions.length > 0 && (
+                <div role="group" aria-label="Filter by status" className="flex flex-wrap gap-1.5">
+                  {["all", ...statusOptions].map((value) => {
+                    const active = statusFilter === value;
                     return (
-                      <tr
-                        key={item.id}
-                        className={`transition hover:bg-slate-50 ${selectedDetailId === item.id ? "bg-slate-50/80" : "bg-white"}`}
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => setStatusFilter(value)}
+                        className={[
+                          "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors duration-150 motion-reduce:transition-none",
+                          active ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900",
+                        ].join(" ")}
                       >
-                        <td className="px-4 py-4 align-top">
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400 disabled:cursor-not-allowed"
-                            checked={isSelected}
-                            onChange={() => toggleSelected(item.id)}
-                            aria-label={`Select run ${item.id}`}
-                          />
-                        </td>
-                        <td className="px-4 py-4 align-top">
-                          <div className="text-sm font-semibold text-slate-950">Run #{item.id}</div>
-                          <div className="text-xs text-slate-500">
-                            {pluralize(item.total_orders, "order")} • {pluralize(item.total_customers, "customer")}
-                          </div>
-                        </td>
-                        <td className="px-4 py-4 align-top text-sm text-slate-700">
-                          <div>{item.date_from}</div>
-                          <div className="text-slate-400">to {item.date_to}</div>
-                        </td>
-                        <td className="px-4 py-4 align-top">
-                          <StatusBadge status={item.status} />
-                        </td>
-                        <td className="px-4 py-4 align-top text-sm font-medium text-slate-900">{item.total_invoices}</td>
-                        <td className="px-4 py-4 align-top">
-                          <button
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                            onClick={() => loadDetail(item.id)}
-                          >
-                            View summary
-                          </button>
-                        </td>
-                      </tr>
+                        {value === "all" ? "All" : formatHistoryStatusLabel(value)}
+                        <span className={["tabular-nums", active ? "text-white/70" : "text-slate-400"].join(" ")}>
+                          {value === "all" ? history.length : statusCounts[value]}
+                        </span>
+                      </button>
                     );
                   })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </SectionCard>
+                </div>
+              )}
 
-        <SectionCard title="Run summary" action={selectedRun ? <StatusBadge status={selectedRun.status} /> : null}>
-          {detailLoading ? (
-            <div className="space-y-3">
-              <div className="h-5 w-2/3 animate-pulse rounded-full bg-slate-100" />
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="h-24 animate-pulse rounded-2xl bg-slate-100" />
-                <div className="h-24 animate-pulse rounded-2xl bg-slate-100" />
-                <div className="h-24 animate-pulse rounded-2xl bg-slate-100" />
-                <div className="h-24 animate-pulse rounded-2xl bg-slate-100" />
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-slate-600" aria-live="polite">
+                  <span className="font-medium tabular-nums text-slate-900">{selectedCount}</span> selected
+                  {hiddenSelectedCount > 0 && <span className="text-slate-500"> ({hiddenSelectedCount} hidden by filters)</span>}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={BUTTON_GHOST}
+                    onClick={filtersActive ? selectFiltered : selectAllVisible}
+                    disabled={loading || filteredHistory.length === 0 || (filtersActive ? allFilteredSelected : allVisibleSelected)}
+                  >
+                    Select all visible
+                  </button>
+                  <button type="button" className={BUTTON_GHOST} onClick={clearSelection} disabled={loading || selectedCount === 0}>
+                    Clear selection
+                  </button>
+                  <button
+                    type="button"
+                    className={BUTTON_DANGER}
+                    onClick={openResetConfirmation}
+                    disabled={loading || resetting || selectedCount === 0}
+                  >
+                    Reset selected
+                  </button>
+                </div>
               </div>
             </div>
-          ) : selectedRun ? (
-            <div className="space-y-4">
-              <p className="text-sm leading-6 text-slate-600">{selectedSummary}</p>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <SummaryField label="Period" value={`${selectedRun.date_from} to ${selectedRun.date_to}`} />
-                <SummaryField label="Started at" value={formatDateTime(selectedRun.started_at)} />
-                <SummaryField label="Finished at" value={formatDateTime(selectedRun.finished_at)} />
-                <SummaryField label="Run status" value={<StatusBadge status={selectedRun.status} />} />
-                <SummaryField label="Orders" value={selectedRun.total_orders} />
-                <SummaryField label="Customers" value={selectedRun.total_customers} />
-                <SummaryField label="Invoices" value={selectedRun.total_invoices} />
-                {errorText && <SummaryField label="Error message" value={errorText} />}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-600">
-              Select a run to see the summary.
-            </div>
-          )}
-        </SectionCard>
-      </div>
 
-      <Modal
-        open={resetConfirmOpen}
-        title="Reset selected runs"
-        onClose={() => {
-          setResetConfirmOpen(false);
-          setPendingResetRunIds([]);
-        }}
-        actions={
-          <>
-            <button
-              type="button"
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-              onClick={() => {
-                setResetConfirmOpen(false);
-                setPendingResetRunIds([]);
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => resetSelectedRuns(pendingResetRunIds)}
-              disabled={resetting}
-            >
-              Confirm reset
-            </button>
-          </>
-        }
-      >
-        <p>Are you sure you want to reset the selected sync runs?</p>
-        <p className="mt-2">This will remove their sync records and allow them to be processed again.</p>
-      </Modal>
+            {loading ? (
+              <div className="space-y-3 p-4 sm:p-5" aria-label="Loading sync runs">
+                {[1, 2, 3].map((item) => (
+                  <div key={item} className="h-14 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />
+                ))}
+              </div>
+            ) : history.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-sm font-medium text-slate-900">No sync runs yet</p>
+                <p className="mt-1 text-sm text-slate-500">Runs appear here after you sync orders from the Sync page.</p>
+              </div>
+            ) : filteredHistory.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-sm font-medium text-slate-900">No runs match these filters</p>
+                <p className="mt-1 text-sm text-slate-500">Try a different run ID or status.</p>
+                <button type="button" className={`${BUTTON_SECONDARY} mt-4`} onClick={clearFilters}>
+                  Clear filters
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="hidden overflow-x-auto md:block">
+                  <table className="w-full text-left text-sm">
+                    <caption className="sr-only">Sync runs</caption>
+                    <thead className="border-b border-slate-200 bg-slate-50/70 text-xs text-slate-500">
+                      <tr>
+                        <th scope="col" className="w-12 px-4 py-2.5 font-medium">
+                          <span className="sr-only">Select</span>
+                        </th>
+                        <th scope="col" className="px-3 py-2.5 font-medium">Run</th>
+                        <th scope="col" className="px-3 py-2.5 font-medium">Period</th>
+                        <th scope="col" className="px-3 py-2.5 font-medium">Status</th>
+                        <th scope="col" className="px-3 py-2.5 text-right font-medium">Invoices</th>
+                        <th scope="col" className="px-4 py-2.5 text-right font-medium">
+                          <span className="sr-only">Actions</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {filteredHistory.map((item) => {
+                        const isSelected = selectedRunIds.has(item.id);
+                        const isViewing = selectedDetailId === item.id;
+                        return (
+                          <tr key={item.id} className={isViewing ? "bg-brand-50/50" : "transition-colors hover:bg-slate-50/70"}>
+                            <td className="px-4 py-3 align-top">
+                              <input
+                                type="checkbox"
+                                className="mt-0.5 h-4 w-4 cursor-pointer accent-brand-600"
+                                checked={isSelected}
+                                onChange={() => toggleSelected(item.id)}
+                                aria-label={`Select run ${item.id}`}
+                              />
+                            </td>
+                            <td className="px-3 py-3 align-top">
+                              <div className="font-semibold text-slate-950">Run #{item.id}</div>
+                              <div className="mt-0.5 whitespace-nowrap text-xs text-slate-500">{formatDateTime(item.started_at)}</div>
+                            </td>
+                            <td className="px-3 py-3 align-top">
+                              <div className="text-slate-700">{formatPeriod(item.date_from, item.date_to)}</div>
+                              <div className="mt-0.5 text-xs text-slate-500">
+                                {pluralize(item.total_orders, "order")} · {pluralize(item.total_customers, "customer")}
+                              </div>
+                            </td>
+                            <td className="px-3 py-3 align-top">
+                              <HistoryStatusBadge status={item.status} />
+                            </td>
+                            <td className="px-3 py-3 text-right align-top font-semibold tabular-nums text-slate-950">{item.total_invoices}</td>
+                            <td className="px-4 py-3 text-right align-top">
+                              <button
+                                type="button"
+                                className={[
+                                  "whitespace-nowrap rounded-md px-2 py-1 text-sm font-medium transition-colors duration-150 motion-reduce:transition-none",
+                                  isViewing ? "bg-brand-100 text-brand-800" : "text-brand-700 hover:bg-brand-50 hover:text-brand-800",
+                                ].join(" ")}
+                                onClick={() => viewRun(item.id)}
+                                aria-pressed={isViewing}
+                              >
+                                View details
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <ul className="divide-y divide-slate-100 md:hidden">
+                  {filteredHistory.map((item) => {
+                    const isSelected = selectedRunIds.has(item.id);
+                    const isViewing = selectedDetailId === item.id;
+                    return (
+                      <li key={item.id} className={["flex gap-3 p-4", isViewing ? "bg-brand-50/50" : ""].join(" ")}>
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-[18px] w-[18px] shrink-0 cursor-pointer accent-brand-600"
+                          checked={isSelected}
+                          onChange={() => toggleSelected(item.id)}
+                          aria-label={`Select run ${item.id}`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-semibold text-slate-950">Run #{item.id}</span>
+                            <HistoryStatusBadge status={item.status} />
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500">{formatDateTime(item.started_at)}</div>
+                          <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                            <div className="col-span-2 flex gap-1.5">
+                              <dt className="text-slate-400">Period</dt>
+                              <dd className="min-w-0 text-slate-700">{formatPeriod(item.date_from, item.date_to)}</dd>
+                            </div>
+                            <div className="flex gap-1.5">
+                              <dt className="text-slate-400">Orders</dt>
+                              <dd className="tabular-nums text-slate-700">{item.total_orders}</dd>
+                            </div>
+                            <div className="flex gap-1.5">
+                              <dt className="text-slate-400">Invoices</dt>
+                              <dd className="font-semibold tabular-nums text-slate-950">{item.total_invoices}</dd>
+                            </div>
+                          </dl>
+                          <button
+                            type="button"
+                            className={`${isViewing ? BUTTON_SECONDARY : BUTTON_GHOST} -ml-3 mt-2`}
+                            onClick={() => viewRun(item.id)}
+                            aria-pressed={isViewing}
+                          >
+                            View details
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </section>
+
+          <section
+            ref={detailPanelRef}
+            aria-labelledby="run-detail-heading"
+            className="min-w-0 scroll-mt-28 rounded-2xl border border-slate-200/80 bg-white shadow-card xl:sticky xl:top-24"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-4 sm:px-5">
+              <h2 id="run-detail-heading" className="text-base font-semibold tracking-tight text-slate-950">
+                {displayedRun ? `Run #${displayedRun.id}` : "Run details"}
+              </h2>
+              {displayedRun && !detailLoading ? <HistoryStatusBadge status={displayedRun.status} /> : null}
+            </div>
+
+            <div className="p-4 sm:p-5" aria-busy={detailLoading}>
+              {detailLoading ? (
+                <div className="space-y-3">
+                  <div className="h-4 w-2/3 animate-pulse rounded-full bg-slate-100 motion-reduce:animate-none" />
+                  <div className="h-28 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />
+                  <div className="h-20 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />
+                </div>
+              ) : displayedRun ? (
+                <div className="space-y-5">
+                  <p className="text-sm text-slate-600">
+                    {`${pluralize(displayedRun.total_orders, "order")} processed, ${pluralize(displayedRun.total_customers, "customer")}, ${pluralize(displayedRun.total_invoices, "invoice")} created`}
+                  </p>
+
+                  <dl className="grid grid-cols-2 divide-y divide-slate-200/70 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/60 [&>*:nth-child(odd)]:border-r [&>*]:border-slate-200/70">
+                    <SummaryField label="Period" value={formatPeriod(displayedRun.date_from, displayedRun.date_to)} wide />
+                    <SummaryField label="Started" value={formatDateTime(displayedRun.started_at)} />
+                    <SummaryField label="Finished" value={formatDateTime(displayedRun.finished_at)} />
+                    <SummaryField label="Orders" value={displayedRun.total_orders} />
+                    <SummaryField label="Customers" value={displayedRun.total_customers} />
+                    <SummaryField label="Invoices" value={displayedRun.total_invoices} wide />
+                  </dl>
+
+                  {displayedErrorText && (
+                    <div role="note" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                      <div className="font-medium">Run error</div>
+                      <p className="mt-1 whitespace-pre-wrap break-words leading-6">{displayedErrorText}</p>
+                    </div>
+                  )}
+
+                  {!detailForSelected ? (
+                    <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                      Order and invoice details are not available for this run.
+                    </p>
+                  ) : (
+                    <>
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-950">
+                          Orders <span className="font-normal tabular-nums text-slate-500">{detailOrders.length}</span>
+                        </h3>
+                        {detailOrders.length === 0 ? (
+                          <p className="mt-2 text-sm text-slate-500">No order records for this run.</p>
+                        ) : (
+                          <ul className="mt-2 divide-y divide-slate-100 rounded-xl border border-slate-200">
+                            {detailOrders.map((order, index) => (
+                              <li key={`${order.unify_order_id}-${index}`} className="px-3.5 py-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="min-w-0 break-all font-mono text-xs font-medium text-slate-700">{order.unify_order_id}</span>
+                                  <HistoryStatusBadge status={order.status} />
+                                </div>
+                                {order.customer_name && <div className="mt-1 break-words text-sm font-medium text-slate-950">{order.customer_name}</div>}
+                                {cleanMessage(order.message) && (
+                                  <p
+                                    className={[
+                                      "mt-1 break-words text-xs leading-5",
+                                      String(order.status).toLowerCase() === "failed" ? "text-rose-700" : "text-slate-500",
+                                    ].join(" ")}
+                                  >
+                                    {cleanMessage(order.message)}
+                                  </p>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-950">
+                          Invoices <span className="font-normal tabular-nums text-slate-500">{detailInvoices.length}</span>
+                        </h3>
+                        {detailInvoices.length === 0 ? (
+                          <p className="mt-2 text-sm text-slate-500">No invoice records for this run.</p>
+                        ) : (
+                          <ul className="mt-2 divide-y divide-slate-100 rounded-xl border border-slate-200">
+                            {detailInvoices.map((invoice, index) => (
+                              <li key={`${invoice.zoho_invoice_id ?? "invoice"}-${index}`} className="px-3.5 py-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="min-w-0 break-words text-sm font-medium text-slate-950">{invoice.unify_customer_name}</span>
+                                  <HistoryStatusBadge status={invoice.status} />
+                                </div>
+                                <dl className="mt-1.5 space-y-0.5 text-xs">
+                                  {invoice.zoho_invoice_id && (
+                                    <div className="flex gap-1.5">
+                                      <dt className="shrink-0 text-slate-400">Zoho invoice ID</dt>
+                                      <dd className="min-w-0 break-all font-mono text-slate-700">{invoice.zoho_invoice_id}</dd>
+                                    </div>
+                                  )}
+                                  {Array.isArray(invoice.unify_order_ids) && invoice.unify_order_ids.length > 0 && (
+                                    <div className="flex gap-1.5">
+                                      <dt className="shrink-0 text-slate-400">{invoice.unify_order_ids.length === 1 ? "Order" : "Orders"}</dt>
+                                      <dd className="min-w-0 break-all font-mono text-slate-700">{invoice.unify_order_ids.join(", ")}</dd>
+                                    </div>
+                                  )}
+                                </dl>
+                                {cleanMessage(invoice.message) && (
+                                  <p className="mt-1 break-words text-xs leading-5 text-slate-500">{cleanMessage(invoice.message)}</p>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <p className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-600">
+                  Select a run to see its summary, orders and invoices.
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
+
+        <Modal
+          open={resetConfirmOpen}
+          title="Reset selected runs"
+          onClose={() => {
+            setResetConfirmOpen(false);
+            setPendingResetRunIds([]);
+          }}
+          actions={
+            <>
+              <button
+                type="button"
+                className={BUTTON_SECONDARY}
+                onClick={() => {
+                  setResetConfirmOpen(false);
+                  setPendingResetRunIds([]);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={BUTTON_DANGER_SOLID}
+                onClick={() => resetSelectedRuns(pendingResetRunIds)}
+                disabled={resetting}
+              >
+                Confirm reset
+              </button>
+            </>
+          }
+        >
+          <p>Are you sure you want to reset the selected sync runs?</p>
+          <p className="mt-2">This will remove their sync records and allow them to be processed again.</p>
+          {pendingResetRunIds.length > 0 && (
+            <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              <span className="font-medium text-slate-900">{pluralize(pendingResetRunIds.length, "run")}:</span>{" "}
+              <span className="break-words tabular-nums">{pendingResetRunIds.map((id) => `#${id}`).join(", ")}</span>
+            </p>
+          )}
+        </Modal>
       </main>
     </AppShell>
   );
