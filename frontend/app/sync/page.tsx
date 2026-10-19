@@ -49,10 +49,15 @@ type CustomerSummary = { order_count: number; total: number };
 
 type SyncDetail = {
   order_id: string;
-  status: "created" | "skipped" | "failed";
+  // Backend returns created / skipped / failed / already_exported; "unknown" is set by the
+  // frontend when the response has no usable result for a submitted order.
+  status: "created" | "skipped" | "failed" | "already_exported" | "unknown";
   message: string;
   zoho_invoice_id?: string;
 };
+
+// Result statuses that mean the order now has an export record (it must not be sent again).
+const EXPORTED_RESULT_STATUSES = new Set(["created", "skipped", "already_exported"]);
 
 type SyncResult = {
   sync_run_id?: number;
@@ -538,6 +543,9 @@ export default function SyncPage() {
   const [message, setMessage] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [exportResult, setExportResult] = useState<SyncResult | null>(null);
+  // Per-order results accumulated across sync runs in this session, so a failed or
+  // unknown outcome is not forgotten when a later run replaces exportResult.
+  const [orderSyncResults, setOrderSyncResults] = useState<Record<string, SyncDetail>>({});
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
   const [lastFetchedRange, setLastFetchedRange] = useState<DateRange | null>(null);
   const [fetchSummary, setFetchSummary] = useState<FetchSummary | null>(null);
@@ -566,6 +574,7 @@ export default function SyncPage() {
 
   const clearLoadedState = () => {
     setExportResult(null);
+    setOrderSyncResults({});
     setOrders([]);
     setCustomers({});
     setSelectedOrderIds(new Set());
@@ -612,7 +621,7 @@ export default function SyncPage() {
     return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
-  const getResultByOrderId = (orderId: string) => exportResult?.details?.find((item) => item.order_id === orderId);
+  const getResultByOrderId = (orderId: string): SyncDetail | undefined => orderSyncResults[orderId];
 
   const getOrderStatus = (order: UnifiedOrder): OrderStatus => {
     if (order.already_exported) {
@@ -623,6 +632,9 @@ export default function SyncPage() {
     if (result?.status === "created") return "synced";
     if (result?.status === "failed") return "failed";
     if (result?.status === "skipped") return "already_synced";
+    if (result?.status === "already_exported") return "already_synced";
+    // Any other (unknown or missing) result is ambiguous: never ready, never successful.
+    if (result) return "failed";
     return "ready";
   };
 
@@ -1092,15 +1104,30 @@ export default function SyncPage() {
         status: data.status,
         durationMs: performance.now() - requestStartedAt,
       });
-      setExportResult(data);
-      const syncedOrderIds = new Set(
-        (data.details ?? [])
-          .filter((detail) => detail.status === "created" || detail.status === "skipped")
-          .map((detail) => detail.order_id),
+      // Only explicit per-order results are trusted. A submitted order with no usable
+      // result is recorded as "unknown" (blocked, never treated as successful).
+      const result: SyncResult = data && typeof data === "object" ? data : {};
+      const responseDetails = (Array.isArray(result.details) ? result.details : []).filter(
+        (detail): detail is SyncDetail => Boolean(detail) && typeof detail.order_id === "string" && orderIds.includes(detail.order_id),
       );
-      if (syncedOrderIds.size === 0 && orderIds.length === 1) {
-        syncedOrderIds.add(orderIds[0]);
-      }
+      const missingOrderIds = orderIds.filter((orderId) => !responseDetails.some((detail) => detail.order_id === orderId));
+      const unknownDetails: SyncDetail[] = missingOrderIds.map((orderId) => ({
+        order_id: orderId,
+        status: "unknown",
+        message: "No result was returned for this order. Check History or Zoho before retrying.",
+      }));
+      const runDetails = [...responseDetails, ...unknownDetails];
+      setExportResult({ ...result, details: runDetails });
+      setOrderSyncResults((current) => {
+        const next = { ...current };
+        runDetails.forEach((detail) => {
+          next[detail.order_id] = detail;
+        });
+        return next;
+      });
+      const syncedOrderIds = new Set(
+        runDetails.filter((detail) => EXPORTED_RESULT_STATUSES.has(detail.status)).map((detail) => detail.order_id),
+      );
       if (syncedOrderIds.size > 0) {
         setOrders((currentOrders) =>
           currentOrders.map((order) => (syncedOrderIds.has(order.order_id) ? { ...order, already_exported: true } : order)),
@@ -1111,7 +1138,13 @@ export default function SyncPage() {
           return next;
         });
       }
-      setMessage(formatSyncResultMessage(data));
+      setMessage(
+        missingOrderIds.length
+          ? `Error: No result was returned for ${pluralize(missingOrderIds.length, "order")}. Check History or Zoho before retrying.${
+              responseDetails.length ? ` ${formatSyncResultMessage(result)}.` : ""
+            }`
+          : formatSyncResultMessage(result),
+      );
     } catch (error) {
       console.error("[Sync] Export request failed", {
         action: actionLabel,
@@ -1119,7 +1152,20 @@ export default function SyncPage() {
         orderIds,
         error,
       });
-      setMessage(`Error: ${describeError(error)}`);
+      // The backend may have processed some orders before the error or timeout, so their
+      // outcome is unknown: block them from being re-sent until the preview is reloaded.
+      setOrderSyncResults((current) => {
+        const next = { ...current };
+        orderIds.forEach((orderId) => {
+          next[orderId] = {
+            order_id: orderId,
+            status: "unknown",
+            message: "The sync request did not complete. Check History or Zoho, then re-upload the file before retrying.",
+          };
+        });
+        return next;
+      });
+      setMessage(`Error: ${describeError(error)}. Check History or Zoho, then re-upload the file before retrying.`);
     } finally {
       setLoading(false);
       setSyncRunning(false);
@@ -1185,8 +1231,12 @@ export default function SyncPage() {
   ];
   const showGeneralMessage = Boolean(message) && message !== csvUploadMessage;
   const getOrderBadge = (order: UnifiedOrder): { tone: StatusTone; label: string } => {
-    if (!order.already_exported && getResultByOrderId(order.order_id)?.status === "failed") {
+    const syncResult = order.already_exported ? undefined : getResultByOrderId(order.order_id);
+    if (syncResult?.status === "failed") {
       return { tone: "failed", label: "Sync failed" };
+    }
+    if (syncResult && !EXPORTED_RESULT_STATUSES.has(syncResult.status)) {
+      return { tone: "review", label: "Result unknown" };
     }
     const label = getPreviewBadgeLabel(order);
     return { tone: BADGE_TONE_BY_LABEL[label] ?? "neutral", label };
