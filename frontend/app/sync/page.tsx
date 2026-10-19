@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as XLSX from "xlsx";
 import { AppShell } from "../../components/app-shell";
@@ -10,6 +10,8 @@ import { Popover, PopoverContent, PopoverTrigger, usePopoverContext } from "../.
 import { PageHeader } from "../../components/ui/page-header";
 import { StepIndicator } from "../../components/ui/step-indicator";
 import type { Step, StepState } from "../../components/ui/step-indicator";
+import { StatusBadge } from "../../components/ui/status-badge";
+import type { StatusTone } from "../../components/ui/status-badge";
 
 type OrderLine = { item_sku: string; item_name: string; quantity: number; price: number };
 type UnifyOrderPreview = {
@@ -97,11 +99,49 @@ const WORKFLOW_STEPS: Step[] = [
   { label: "Sync to Zoho", description: "Create draft invoices" },
 ];
 
-const BUTTON_BASE =
-  "inline-flex items-center justify-center whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-medium transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-50";
+const BUTTON_SHAPE =
+  "inline-flex items-center justify-center whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-medium transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed";
+const BUTTON_BASE = `${BUTTON_SHAPE} disabled:opacity-50`;
+// Per-order Sync: neutral grey when disabled so ineligible orders never look actionable.
+const BUTTON_ORDER_SYNC = `${BUTTON_SHAPE} bg-brand-600 text-white shadow-card hover:bg-brand-700 disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none disabled:hover:bg-slate-100`;
 const BUTTON_PRIMARY = `${BUTTON_BASE} bg-brand-600 text-white shadow-card hover:bg-brand-700 disabled:hover:bg-brand-600`;
 const BUTTON_SECONDARY = `${BUTTON_BASE} border border-slate-200 bg-white text-slate-700 shadow-card hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950`;
 const BUTTON_GHOST = `${BUTTON_BASE} text-slate-600 hover:bg-slate-100 hover:text-slate-950 disabled:hover:bg-transparent`;
+const BUTTON_DANGER = `${BUTTON_BASE} border border-rose-200 bg-white text-rose-700 shadow-card hover:border-rose-300 hover:bg-rose-50`;
+
+// Visual tone for the label produced by getPreviewBadgeLabel (display only).
+const BADGE_TONE_BY_LABEL: Record<string, StatusTone> = {
+  Synced: "synced",
+  "Ready to sync": "ready",
+  "Needs review": "review",
+  Error: "failed",
+  Blocked: "blocked",
+};
+
+// Formats plain YYYY-MM-DD values for display; anything else is shown as received.
+function formatPlainDate(value: unknown) {
+  if (typeof value !== "string") {
+    return value == null ? "" : String(value);
+  }
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) {
+    return value;
+  }
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return Number.isNaN(date.getTime()) ? value : dateFormatter.format(date);
+}
+
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className={["ml-1.5 h-3.5 w-3.5 transition-transform duration-150 motion-reduce:transition-none", open ? "rotate-180" : ""].join(" ")}
+    >
+      <path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
+    </svg>
+  );
+}
 
 const tryParseJson = (text: string) => {
   try {
@@ -324,27 +364,94 @@ function Modal({
   actions?: ReactNode;
   onClose?: () => void;
 }) {
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Keyboard support: focus moves into the dialog, Tab stays inside it, Escape
+  // acts like the Close button (only when one exists), and focus returns afterwards.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panelRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const panel = panelRef.current;
+      if (!panel) {
+        return;
+      }
+      if (event.key === "Escape") {
+        if (onCloseRef.current) {
+          event.preventDefault();
+          onCloseRef.current();
+        }
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || active === panel || !panel.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      if (previouslyFocused && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [open]);
+
   if (!open) {
     return null;
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_30px_80px_-24px_rgba(15,23,42,0.5)]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 px-4 py-6 backdrop-blur-sm">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-overlay focus:outline-none"
+      >
         <div className="flex items-start justify-between gap-4">
-          <h3 className="text-xl font-semibold tracking-tight text-slate-950">{title}</h3>
+          <h2 id={titleId} className="text-lg font-semibold tracking-tight text-slate-950">
+            {title}
+          </h2>
           {onClose ? (
             <button
               type="button"
-              className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
+              className="rounded-lg px-2.5 py-1 text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800"
               onClick={onClose}
             >
               Close
             </button>
           ) : null}
         </div>
-        <div className="mt-4 text-sm leading-6 text-slate-600">{children}</div>
-        {actions ? <div className="mt-6 flex flex-wrap justify-end gap-3">{actions}</div> : null}
+        <div className="mt-3 text-sm leading-6 text-slate-600">{children}</div>
+        {actions ? <div className="mt-6 flex flex-wrap justify-end gap-2">{actions}</div> : null}
       </div>
     </div>
   );
@@ -1061,6 +1168,13 @@ export default function SyncPage() {
     { label: "Invoices created", value: exportResult?.created ?? 0 },
   ];
   const showGeneralMessage = Boolean(message) && message !== csvUploadMessage;
+  const getOrderBadge = (order: UnifiedOrder): { tone: StatusTone; label: string } => {
+    if (!order.already_exported && getResultByOrderId(order.order_id)?.status === "failed") {
+      return { tone: "failed", label: "Sync failed" };
+    }
+    const label = getPreviewBadgeLabel(order);
+    return { tone: BADGE_TONE_BY_LABEL[label] ?? "neutral", label };
+  };
 
   return (
     <AppShell>
@@ -1265,117 +1379,193 @@ export default function SyncPage() {
 
         {orders.length > 0 && (
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-            <div className="space-y-4 xl:col-span-2">
-              <div className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
-                <div className="flex items-end justify-between gap-4">
-                  <div>
-                    <h3 className="text-lg font-semibold tracking-tight text-slate-950">Order preview</h3>
-                    <p className="text-sm text-slate-500">Each card below represents one unique Unify order.</p>
+            <div className="min-w-0 space-y-4 xl:col-span-2">
+              <section aria-labelledby="order-preview-heading" className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-card sm:p-6">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <h2 id="order-preview-heading" className="text-base font-semibold tracking-tight text-slate-950">
+                      Order preview
+                    </h2>
+                    <p className="mt-0.5 text-sm text-slate-500">One card per unique Unify order. Totals exclude VAT.</p>
                   </div>
-                  <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-sm text-slate-500">{previewOrderCount} unique orders</div>
+                  <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
+                    {previewOrderCount} unique orders
+                  </span>
                 </div>
 
-                <div className="mt-5 space-y-4">
+                <div className="mt-5 space-y-3">
                   {orders.map((order) => {
                     const detail = getOrderDetail(order);
                     const isExpanded = expandedOrderIds.has(order.order_id);
                     const isLoadingDetail = orderDetailsLoading[order.order_id];
+                    const isSelected = selectedOrderIds.has(order.order_id);
+                    const isIneligible = order.already_exported || getOrderStatus(order) !== "ready";
+                    const badge = getOrderBadge(order);
+                    const customerName = getBuyerDisplayName(order);
+                    const itemsPanelId = `order-items-${String(order.order_id).replace(/[^A-Za-z0-9_-]/g, "_")}`;
                     return (
-                      <article key={order.order_id} className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-5 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.35)] transition hover:shadow-[0_20px_45px_-28px_rgba(15,23,42,0.3)]">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-3">
-                              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-                                <input
-                                  type="checkbox"
-                                  className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400 disabled:cursor-not-allowed"
-                                  checked={selectedOrderIds.has(order.order_id)}
-                                  disabled={order.already_exported || loading || getOrderStatus(order) !== "ready"}
-                                  onChange={() => toggleSelected(order.order_id)}
-                                />
-                                Select
-                              </label>
-                              <span
+                      <article
+                        key={order.order_id}
+                        aria-label={`Order ${order.order_id}, ${customerName}`}
+                        className={[
+                          "rounded-xl border bg-white transition-colors duration-150 motion-reduce:transition-none",
+                          isSelected ? "border-brand-300 ring-1 ring-brand-200" : "border-slate-200 hover:border-slate-300",
+                        ].join(" ")}
+                      >
+                        <div className="flex gap-3 p-4 sm:gap-4 sm:p-5">
+                          <label
+                            className={[
+                              "-m-1.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md",
+                              isIneligible || loading ? "cursor-not-allowed" : "cursor-pointer hover:bg-slate-100",
+                            ].join(" ")}
+                            title={order.already_exported ? "Already synced" : isIneligible ? "Not eligible for sync" : undefined}
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-[18px] w-[18px] cursor-[inherit] accent-brand-600 disabled:opacity-40"
+                              checked={selectedOrderIds.has(order.order_id)}
+                              disabled={order.already_exported || loading || getOrderStatus(order) !== "ready"}
+                              onChange={() => toggleSelected(order.order_id)}
+                              aria-label={`Select order ${order.order_id} for ${customerName}`}
+                            />
+                          </label>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                                  <h3 className="min-w-0 break-words text-[15px] font-semibold leading-6 text-slate-950">{customerName}</h3>
+                                  <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
+                                  <span>
+                                    Order <span className="font-mono font-medium text-slate-700">{order.order_id}</span>
+                                  </span>
+                                  {order.order_date && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span>Ordered {formatPlainDate(order.order_date)}</span>
+                                    </>
+                                  )}
+                                  <span aria-hidden="true">·</span>
+                                  <span>Delivery {formatPlainDate(getDeliveryLabel(order))}</span>
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 items-baseline gap-1.5 sm:block sm:text-right">
+                                <div className="text-lg font-semibold tabular-nums tracking-tight text-slate-950">{formatCurrencyEur(order.total)}</div>
+                                <div className="text-xs text-slate-500">excl. VAT</div>
+                              </div>
+                            </div>
+
+                            {((order.customer_name && getCustomerDisplayName(order) !== getBuyerDisplayName(order)) ||
+                              order.delivery_address ||
+                              order.buyer_id) && (
+                              <dl className="mt-3 space-y-0.5 text-xs">
+                                {order.customer_name && getCustomerDisplayName(order) !== getBuyerDisplayName(order) && (
+                                  <div className="flex gap-1.5">
+                                    <dt className="shrink-0 text-slate-400">Recipient</dt>
+                                    <dd className="min-w-0 break-words text-slate-600">{getCustomerDisplayName(order)}</dd>
+                                  </div>
+                                )}
+                                {order.delivery_address && (
+                                  <div className="flex gap-1.5">
+                                    <dt className="shrink-0 text-slate-400">Delivery address</dt>
+                                    <dd className="min-w-0 break-words text-slate-600">{order.delivery_address}</dd>
+                                  </div>
+                                )}
+                                {order.buyer_id && (
+                                  <div className="flex gap-1.5">
+                                    <dt className="shrink-0 text-slate-400">Buyer ID</dt>
+                                    <dd className="min-w-0 break-words font-mono text-slate-600">{order.buyer_id}</dd>
+                                  </div>
+                                )}
+                              </dl>
+                            )}
+
+                            {order.preview_reason && (
+                              <p
                                 className={[
-                                  "rounded-full border px-3 py-1 text-xs font-semibold tracking-[0.16em]",
-                                  getBadgeClasses(order),
+                                  "mt-3 rounded-lg border px-3 py-2 text-xs leading-5",
+                                  badge.tone === "review"
+                                    ? "border-amber-200 bg-amber-50 text-amber-800"
+                                    : badge.tone === "failed"
+                                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                                      : "border-slate-200 bg-slate-50 text-slate-600",
                                 ].join(" ")}
                               >
-                                {getPreviewBadgeLabel(order)}
-                              </span>
-                            </div>
-                            <p className="mt-3 text-xs font-medium uppercase tracking-[0.24em] text-slate-500">Order</p>
-                            <h4 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">{order.order_id}</h4>
-                            <p className="mt-1 text-sm font-medium text-slate-700">Customer: {getBuyerDisplayName(order)}</p>
-                            {order.customer_name && getCustomerDisplayName(order) !== getBuyerDisplayName(order) && (
-                              <p className="mt-1 text-xs font-light text-slate-400">Recipient: {getCustomerDisplayName(order)}</p>
+                                <span className="font-medium">Reason:</span> {order.preview_reason}
+                              </p>
                             )}
-                            {order.delivery_address && <p className="mt-1 text-xs font-light text-slate-400">Delivery address: {order.delivery_address}</p>}
-                            {order.buyer_id && <p className="mt-1 text-xs font-light text-slate-400">Buyer ID: {order.buyer_id}</p>}
-                            <p className="mt-1 text-xs font-light text-slate-400">Delivery: {getDeliveryLabel(order)}</p>
-                            {order.preview_reason && <p className="mt-1 text-xs text-slate-500">Reason: {order.preview_reason}</p>}
-                          </div>
-                          <div className="self-start rounded-2xl border border-slate-200 bg-white px-4 py-3 text-right shadow-sm">
-                            <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">Total</div>
-                            <div className="text-2xl font-semibold tracking-tight text-slate-950">{formatCurrencyEur(order.total)}</div>
-                            <div className="text-sm text-slate-500">Excl. VAT</div>
-                          </div>
-                        </div>
 
-                        <div className="mt-5 flex flex-wrap gap-2">
-                          <button
-                            className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => requestExport([order.order_id])}
-                            disabled={loading || order.already_exported || getOrderStatus(order) !== "ready"}
-                          >
-                            Sync this order
-                          </button>
-                          {order.already_exported && (
-                            <button
-                              className="rounded-xl border border-red-300 bg-white px-4 py-2 text-sm font-medium text-red-700 transition hover:border-red-400 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
-                              onClick={() => unsyncOrder(order.order_id)}
-                              disabled={loading}
-                            >
-                              Unsync
-                            </button>
-                          )}
-                          <button
-                            className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => toggleOrderExpansion(order.order_id)}
-                            disabled={loading || isLoadingDetail}
-                          >
-                            {isExpanded ? "Hide items" : isLoadingDetail ? "Loading items..." : "View items"}
-                          </button>
+                            <div className="mt-4 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                className={BUTTON_ORDER_SYNC}
+                                onClick={() => requestExport([order.order_id])}
+                                disabled={loading || order.already_exported || getOrderStatus(order) !== "ready"}
+                              >
+                                Sync this order
+                              </button>
+                              {order.already_exported && (
+                                <button
+                                  type="button"
+                                  className={BUTTON_DANGER}
+                                  onClick={() => unsyncOrder(order.order_id)}
+                                  disabled={loading}
+                                >
+                                  Unsync
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className={BUTTON_GHOST}
+                                onClick={() => toggleOrderExpansion(order.order_id)}
+                                disabled={loading || isLoadingDetail}
+                                aria-expanded={isExpanded}
+                                aria-controls={itemsPanelId}
+                              >
+                                {isExpanded ? "Hide items" : isLoadingDetail ? "Loading items..." : "View items"}
+                                <ChevronIcon open={isExpanded} />
+                              </button>
+                            </div>
+                          </div>
                         </div>
 
                         {isExpanded && (
-                          <div className="mt-5 overflow-visible rounded-2xl border border-slate-200 bg-white">
+                          <div id={itemsPanelId} className="rounded-b-xl border-t border-slate-200 bg-slate-50/70 px-4 py-4 sm:px-5">
                             {!detail ? (
-                              <div className="px-4 py-4 text-sm text-slate-500">Loading order items...</div>
+                              <p className="text-sm text-slate-500">Loading order items...</p>
                             ) : detail.lines.length === 0 ? (
-                              <div className="px-4 py-4 text-sm text-slate-500">No line items returned for this order.</div>
+                              <p className="text-sm text-slate-500">No line items returned for this order.</p>
                             ) : (
-                              <table className="w-full text-left text-sm">
-                                <thead className="bg-slate-50 text-slate-600">
-                                  <tr>
-                                    <th className="px-4 py-3 font-medium">Product</th>
-                                    <th className="px-4 py-3 font-medium">Quantity</th>
-                                    <th className="px-4 py-3 font-medium">Unit price</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {detail.lines.map((line, idx) => (
-                                    <tr key={`${order.order_id}-${idx}`} className="border-t border-slate-100 transition hover:bg-slate-50">
-                                      <td className="px-4 py-3">
-                                        <div className="font-medium text-slate-900">{line.item_name}</div>
-                                        <div className="text-xs text-slate-500">{line.item_sku}</div>
-                                      </td>
-                                      <td className="px-4 py-3 text-slate-700">{line.quantity}</td>
-                                      <td className="px-4 py-3 text-slate-700">{formatCurrencyEur(line.price)}</td>
+                              <div
+                                className="overflow-x-auto rounded-lg border border-slate-200 bg-white"
+                                role="region"
+                                aria-label={`Items in order ${order.order_id}`}
+                                tabIndex={0}
+                              >
+                                <table className="w-full min-w-[26rem] text-left text-sm">
+                                  <thead className="border-b border-slate-200 bg-slate-50 text-xs text-slate-500">
+                                    <tr>
+                                      <th scope="col" className="px-4 py-2.5 font-medium">Product</th>
+                                      <th scope="col" className="px-4 py-2.5 text-right font-medium">Quantity</th>
+                                      <th scope="col" className="px-4 py-2.5 text-right font-medium">Unit price</th>
                                     </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {detail.lines.map((line, idx) => (
+                                      <tr key={`${order.order_id}-${idx}`}>
+                                        <td className="px-4 py-2.5">
+                                          <div className="font-medium text-slate-900">{line.item_name}</div>
+                                          <div className="font-mono text-xs text-slate-500">{line.item_sku}</div>
+                                        </td>
+                                        <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-slate-700">{line.quantity}</td>
+                                        <td className="whitespace-nowrap px-4 py-2.5 text-right tabular-nums text-slate-700">{formatCurrencyEur(line.price)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             )}
                           </div>
                         )}
@@ -1383,7 +1573,7 @@ export default function SyncPage() {
                     );
                   })}
                 </div>
-              </div>
+              </section>
             </div>
 
             <aside className="space-y-4">
@@ -1526,7 +1716,7 @@ export default function SyncPage() {
             <>
               <button
                 type="button"
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                className={BUTTON_SECONDARY}
                 onClick={() => {
                   setSyncConfirmOpen(false);
                   setPendingSyncOrderIds([]);
@@ -1536,7 +1726,7 @@ export default function SyncPage() {
               </button>
               <button
                 type="button"
-                className="rounded-xl bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                className={BUTTON_PRIMARY}
                 onClick={() => {
                   setSyncConfirmOpen(false);
                   void executeExport(pendingSyncOrderIds);
@@ -1550,20 +1740,20 @@ export default function SyncPage() {
         >
           <p>Are you sure you want to sync the selected invoices?</p>
           <p className="mt-2">This will create draft invoices in Zoho.</p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">Orders</div>
-              <div className="mt-2 text-sm font-medium text-slate-950">{pendingSyncSummary.orderCount}</div>
+          <dl className="mt-4 grid grid-cols-2 overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
+            <div className="border-b border-r border-slate-200 px-4 py-3">
+              <dt className="text-xs font-medium text-slate-500">Orders</dt>
+              <dd className="mt-1 text-base font-semibold tabular-nums text-slate-950">{pendingSyncSummary.orderCount}</dd>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">Customers</div>
-              <div className="mt-2 text-sm font-medium text-slate-950">{pendingSyncSummary.customerCount}</div>
+            <div className="border-b border-slate-200 px-4 py-3">
+              <dt className="text-xs font-medium text-slate-500">Customers</dt>
+              <dd className="mt-1 text-base font-semibold tabular-nums text-slate-950">{pendingSyncSummary.customerCount}</dd>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
-              <div className="text-xs font-medium uppercase tracking-[0.22em] text-slate-500">Total excl. VAT</div>
-              <div className="mt-2 text-sm font-medium text-slate-950">{formatCurrencyEur(pendingSyncSummary.total)}</div>
+            <div className="col-span-2 px-4 py-3">
+              <dt className="text-xs font-medium text-slate-500">Total excl. VAT</dt>
+              <dd className="mt-1 text-lg font-semibold tabular-nums text-slate-950">{formatCurrencyEur(pendingSyncSummary.total)}</dd>
             </div>
-          </div>
+          </dl>
         </Modal>
 
         <Modal open={syncRunning} title="Syncing invoices" onClose={undefined}>
