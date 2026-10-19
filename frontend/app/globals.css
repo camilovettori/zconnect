@@ -11,8 +11,20 @@ body {
 }
 
 ::selection {
-  background: rgba(15, 23, 42, 0.12);
+  background: rgba(31, 106, 235, 0.16);
   color: #0f172a;
+}
+
+/* Keyboard focus baseline. Elements with their own focus styles (focus:ring-*, focus:outline-none) keep them. */
+:focus-visible {
+  outline: 2px solid theme("colors.brand.500");
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
 
 @keyframes popover-in {
