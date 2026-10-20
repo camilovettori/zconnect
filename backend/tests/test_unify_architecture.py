@@ -107,8 +107,13 @@ async def test_preview_fetch_skips_item_hydration(monkeypatch):
     assert orders[1].order_id == "O-2"
     assert svc.last_fetch_debug["previewOrdersCount"] == 2
     assert svc.last_fetch_debug["rawOrdersCount"] == 2
-    assert preview_calls["detail"] == 0
+    # Key guarantee (unchanged): line items are never hydrated during a preview fetch.
     assert preview_calls["items"] == 0
+    # Current behaviour: customer-name resolution looks up each in-range order's detail even
+    # when the list row has a buyerName (buyer_name/customer_name are reset to None just
+    # before the "only if missing" check). Documented here as-is; a possible optimisation in
+    # the dormant Unify date-fetch path, not changed because name resolution is off-limits.
+    assert preview_calls["detail"] == 2
 
 
 @pytest.mark.usefixtures("client")
@@ -285,26 +290,44 @@ def test_single_order_sync_hydrates_only_selected_order_and_creates_invoice(clie
     async def fake_create_contact(self, name):
         return "C-1"
 
-    async def fake_find_item_by_sku(self, sku):
+    # The export pipeline's current Zoho interface (the original test mocked
+    # find_item_by_sku / get_tax_by_rate / create_draft_invoice, which the pipeline no
+    # longer calls, so unmocked calls tried to reach the real Zoho token endpoint).
+    async def fake_get_contact_by_id(self, contact_id):
+        return {"contact": {"contact_id": contact_id, "contact_name": "Buyer O-1"}}
+
+    async def fake_update_contact_name(self, contact_id, name):
+        return True
+
+    async def fake_get_contact_person_ids(self, contact_id):
+        return []
+
+    async def fake_find_item_by_name(self, name):
         return None
 
-    async def fake_create_item(self, sku, name, price):
+    async def fake_create_item(self, name, rate, tax_id):
         return "I-1"
 
-    async def fake_get_tax_by_rate(self, rate):
-        return ""
+    async def fake_find_invoices_by_reference_number(self, reference_number):
+        return []  # duplicate check: no existing Zoho invoice
 
-    async def fake_create_draft_invoice(self, contact_id, lines, reference_number):
+    created_payloads = []
+
+    async def fake_create_draft_invoice_from_payload(self, payload):
+        created_payloads.append(payload)
         return "INV-1"
 
     monkeypatch.setattr(UnifyService, "fetch_orders_preview", fake_fetch_orders_preview)
     monkeypatch.setattr(UnifyService, "fetch_order_with_items", fake_fetch_order_with_items)
     monkeypatch.setattr(ZohoService, "find_contact_by_name", fake_find_contact_by_name)
     monkeypatch.setattr(ZohoService, "create_contact", fake_create_contact)
-    monkeypatch.setattr(ZohoService, "find_item_by_sku", fake_find_item_by_sku)
+    monkeypatch.setattr(ZohoService, "get_contact_by_id", fake_get_contact_by_id)
+    monkeypatch.setattr(ZohoService, "update_contact_name", fake_update_contact_name)
+    monkeypatch.setattr(ZohoService, "get_contact_person_ids", fake_get_contact_person_ids)
+    monkeypatch.setattr(ZohoService, "find_item_by_name", fake_find_item_by_name)
     monkeypatch.setattr(ZohoService, "create_item", fake_create_item)
-    monkeypatch.setattr(ZohoService, "get_tax_by_rate", fake_get_tax_by_rate)
-    monkeypatch.setattr(ZohoService, "create_draft_invoice", fake_create_draft_invoice)
+    monkeypatch.setattr(ZohoService, "find_invoices_by_reference_number", fake_find_invoices_by_reference_number)
+    monkeypatch.setattr(ZohoService, "create_draft_invoice_from_payload", fake_create_draft_invoice_from_payload)
 
     caplog.set_level("INFO")
     started = time.perf_counter()
@@ -325,6 +348,10 @@ def test_single_order_sync_hydrates_only_selected_order_and_creates_invoice(clie
     assert len(exported_orders) == 1
     assert exported_orders[0].unify_order_id == "O-1"
     assert any("TEMP unify single-order sync completed" in record.message for record in caplog.records)
+    # Exactly one invoice, for the selected order only, with VAT tax ids on every line.
+    assert [payload["reference_number"] for payload in created_payloads] == ["O-1"]
+    assert all(line.get("tax_id") for line in created_payloads[0]["line_items"])
+    assert exported_orders[0].status == "exported"
 
 
 @pytest.mark.usefixtures("client")

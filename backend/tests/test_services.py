@@ -71,6 +71,9 @@ async def test_unify_fetch_orders_parses_response(monkeypatch):
             return DummyResponse(status_code=200, json_data={"access_token": "token-1", "expires_in": 3600})
         if url.endswith("/v1/orders"):
             return DummyResponse(status_code=200, json_data=list_payload)
+        if url.endswith("/v1/buyers/B-1/organisation") or url.endswith("/v1/orders/123"):
+            # Customer-name resolution lookups (no extra data in this fixture).
+            return DummyResponse(status_code=404, json_data={}, text="not found")
         raise AssertionError(f"Unexpected request: {method} {url}")
 
     monkeypatch.setattr("httpx.AsyncClient", lambda timeout=10: DummyAsyncClient(handler))
@@ -85,10 +88,15 @@ async def test_unify_fetch_orders_parses_response(monkeypatch):
     assert orders[0].status == "confirmed"
     assert orders[0].total == 2.0
     assert orders[0].preview_status == "ready"
-    assert calls[0][1] == "https://oauth.unifyordering.com/oauth2/token"
-    assert calls[1][1].endswith("/v1/orders")
-    assert len(calls) == 2
-    assert calls[1][2]["headers"]["Authorization"] == "Bearer token-1"
+    # Current behaviour: token, order list, then customer-name resolution for each in-range
+    # order (buyer organisation, then order detail). The original test predates those lookups.
+    assert [call[1] for call in calls] == [
+        "https://oauth.unifyordering.com/oauth2/token",
+        "https://api.unify.example/v1/orders",
+        "https://api.unify.example/v1/buyers/B-1/organisation",
+        "https://api.unify.example/v1/orders/123",
+    ]
+    assert all(call[2]["headers"]["Authorization"] == "Bearer token-1" for call in calls[1:])
 
 
 @pytest.mark.asyncio
@@ -104,6 +112,8 @@ async def test_unify_fetch_orders_handles_paginated_items(monkeypatch):
             return DummyResponse(status_code=200, json_data={"access_token": "token-2", "expires_in": 3600})
         if url.endswith("/v1/orders"):
             return DummyResponse(status_code=200, json_data=list_payload)
+        if url.endswith("/v1/buyers/B-2/organisation") or url.endswith("/v1/orders/ABC-1"):
+            return DummyResponse(status_code=404, json_data={}, text="not found")
         raise AssertionError(f"Unexpected request: {method} {url}")
 
     monkeypatch.setattr("httpx.AsyncClient", lambda timeout=10: DummyAsyncClient(handler))
@@ -115,7 +125,10 @@ async def test_unify_fetch_orders_handles_paginated_items(monkeypatch):
     assert orders[0].order_id == "ABC-1"
     assert orders[0].preview_status == "ready"
     assert orders[0].status == "confirmed"
-    assert len(calls) == 2
+    # No buyer name in the row: the name falls back to the buyer id after the lookups.
+    assert orders[0].customer_name == "Customer B-2"
+    # One list request (no extra pages), plus the two name-resolution lookups.
+    assert [call[1].rsplit("/v1/", 1)[-1] for call in calls[1:]] == ["orders", "buyers/B-2/organisation", "orders/ABC-1"]
 
 
 @pytest.mark.asyncio
@@ -145,8 +158,15 @@ async def test_unify_fetch_orders_preview_truncates_at_max_pages_and_uses_restri
         if url == "https://oauth.unifyordering.com/oauth2/token":
             return DummyResponse(status_code=200, json_data={"access_token": "token-3", "expires_in": 3600})
         if url.endswith("/v1/orders"):
-            assert kwargs["params"]["statuses"] == ["confirmed", "received", "checked"]
+            # Current behaviour: "new" orders are fetched too (shown as blocked/"Error" in the
+            # preview, never exported); the list stays restricted to open statuses.
+            statuses = kwargs["params"]["statuses"]
+            assert statuses == ["new", "confirmed", "received", "checked"] == list(unify_module.UNIFY_PREVIEW_ORDER_STATUSES)
+            assert not {"cancelled", "canceled", "delivered", "completed", "rejected"} & set(statuses)
             return DummyResponse(status_code=200, json_data=page1)
+        if "/v1/orders/" in url:
+            # Orders without a buyer name trigger a detail lookup for name resolution.
+            return DummyResponse(status_code=404, json_data={}, text="not found")
         raise AssertionError(f"Unexpected request: {method} {url}")
 
     monkeypatch.setattr("httpx.AsyncClient", lambda timeout=10: DummyAsyncClient(handler))
@@ -279,10 +299,21 @@ async def test_zoho_create_draft_invoice_payload(monkeypatch):
     monkeypatch.setattr("httpx.AsyncClient", lambda timeout=10: DummyAsyncClient(handler))
 
     svc = ZohoService("https://www.zohoapis.eu", "client", "secret", "refresh", "org")
-    invoice_id = await svc.create_draft_invoice("C1", [{"item_id": "I1", "name": "Product", "quantity": 1, "rate": 100}], "REF-1")
+    # Current behaviour (since the initial commit): every invoice line must carry a Zoho
+    # tax_id (VAT); the original test predates that requirement and sent none.
+    invoice_id = await svc.create_draft_invoice("C1", [{"item_id": "I1", "name": "Product", "quantity": 1, "rate": 100, "tax_id": "TAX-1"}], "REF-1")
 
     assert invoice_id == "INV-1"
     assert captured["is_inclusive_tax"] is False
+    assert captured["reference_number"] == "REF-1"
+    assert captured["line_items"][0]["tax_id"] == "TAX-1"
+    assert "status" not in captured  # draft status is implied by the create endpoint
+
+    # A line without tax_id is rejected before any request reaches Zoho.
+    captured.clear()
+    with pytest.raises(ZohoServiceError, match="Missing tax_id"):
+        await svc.create_draft_invoice("C1", [{"item_id": "I1", "name": "Product", "quantity": 1, "rate": 100}], "REF-2")
+    assert captured == {}
 
 
 @pytest.mark.asyncio

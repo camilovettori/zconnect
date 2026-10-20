@@ -42,12 +42,15 @@ async function forwardToBackend(request: Request, user: AuthenticatedUser) {
     const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
     let res: Response | undefined;
     try {
-      const headers = new Headers();
-      applySignedIdentity(headers, "POST", "/api/unify/preview-csv", "", user);
+      // Serialise the multipart body once so the signed digest covers exactly the bytes sent.
+      const encoded = new Response(forward);
+      const payload = new Uint8Array(await encoded.arrayBuffer());
+      const headers = new Headers({ "Content-Type": encoded.headers.get("content-type") || "multipart/form-data" });
+      applySignedIdentity(headers, "POST", "/api/unify/preview-csv", "", user, payload);
       res = await fetch(backendUrl, {
         method: "POST",
         headers,
-        body: forward,
+        body: payload,
         signal: controller.signal,
       });
     } finally {

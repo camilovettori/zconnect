@@ -19,11 +19,12 @@ async function forwardToBackend(request: Request, user: AuthenticatedUser) {
     let res: Response | undefined;
     try {
       const headers = new Headers({ "Content-Type": "application/json" });
-      applySignedIdentity(headers, "POST", "/api/unify/fetch-orders", "", user);
+      const payload = new TextEncoder().encode(JSON.stringify(body));
+      applySignedIdentity(headers, "POST", "/api/unify/fetch-orders", "", user, payload);
       res = await fetch(`${BACKEND_URL}/api/unify/fetch-orders`, {
         method: "POST",
         headers,
-        body: JSON.stringify(body),
+        body: payload,
         signal: controller.signal,
       });
     } finally {

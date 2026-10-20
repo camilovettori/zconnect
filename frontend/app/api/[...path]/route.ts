@@ -25,9 +25,9 @@ async function proxy(request: Request, pathSegments: string[]) {
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
-  applySignedIdentity(headers, method, `/api/${path}`, url.search, auth.user);
-
-  const body = method === "GET" || method === "HEAD" ? undefined : await request.text();
+  // Forward the exact bytes received and sign their SHA-256 (empty for GET/HEAD).
+  const body = method === "GET" || method === "HEAD" ? undefined : new Uint8Array(await request.arrayBuffer());
+  applySignedIdentity(headers, method, `/api/${path}`, url.search, auth.user, body ?? new Uint8Array());
 
   try {
     const backendStartedAt = performance.now();

@@ -6,6 +6,7 @@ signed the way the Next.js server signs them; anything else must be rejected.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -167,7 +168,9 @@ def test_previous_secret_is_accepted_during_rotation(client, monkeypatch, sign_r
 def test_user_role_cannot_perform_sensitive_operations(client, sign_request, db, method, path):
     seed_exported(db)
     url = concrete(path)
-    response = client.request(method, url, json={"run_ids": [1]}, headers=sign_request(method, url, user_id="user-1", role="user"))
+    body = json.dumps({"run_ids": [1]}).encode()
+    headers = {**sign_request(method, url, user_id="user-1", role="user", body=body), "Content-Type": "application/json"}
+    response = client.request(method, url, content=body, headers=headers)
     assert response.status_code == 403
     assert response.json() == {"detail": "Admin permission required"}
     assert db.query(models.ExportedOrder).one().status == "exported"  # nothing changed
@@ -199,7 +202,9 @@ def test_spoofed_actor_header_cannot_impersonate(client, sign_request, db):
 
 def test_user_role_can_read_and_run_non_sensitive_operations(client, sign_request):
     path = "/api/export/run-csv"
-    response = client.post(path, json={"orders": []}, headers=sign_request("POST", path, role="user"))
+    body = json.dumps({"orders": []}).encode()
+    headers = {**sign_request("POST", path, role="user", body=body), "Content-Type": "application/json"}
+    response = client.post(path, content=body, headers=headers)
     assert response.status_code == 400  # reached the handler (validation), not blocked by auth
 
 
@@ -212,3 +217,105 @@ def test_health_root_stays_public_and_reveals_nothing_sensitive(client):
     response = client.get("/")
     assert response.status_code == 200
     assert set(response.json()) == {"message"}
+
+
+# ---------------------------------------------------------------------------
+# Request body integrity (SHA-256 of the exact bytes is part of the signature)
+# ---------------------------------------------------------------------------
+
+
+def _json_request(sign_request, method, path, payload, **kwargs):
+    body = json.dumps(payload).encode()
+    headers = {**sign_request(method, path, body=body, **kwargs), "Content-Type": "application/json"}
+    return body, headers
+
+
+def test_valid_json_body_is_accepted(client, sign_request, db):
+    seed_exported(db)
+    path = "/api/export/reset-selected-runs"
+    body, headers = _json_request(sign_request, "POST", path, {"run_ids": [1]})
+    response = client.post(path, content=body, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["data"]["reset_exported_orders"] == 1
+
+
+def test_valid_empty_body_is_accepted(client, sign_request, db):
+    seed_exported(db)
+    path = "/api/export/reset-order/O-1"
+    assert client.post(path, headers=sign_request("POST", path, body=b"")).status_code == 200
+
+
+def test_altered_body_is_rejected(client, sign_request, db):
+    seed_exported(db)
+    path = "/api/export/reset-selected-runs"
+    _, headers = _json_request(sign_request, "POST", path, {"run_ids": [999]})
+    tampered = json.dumps({"run_ids": [1]}).encode()  # same headers, different payload
+    response = client.post(path, content=tampered, headers=headers)
+    assert response.status_code == 401
+    assert db.query(models.ExportedOrder).one().status == "exported"
+
+
+def test_body_added_to_a_request_signed_as_empty_is_rejected(client, sign_request, db):
+    seed_exported(db)
+    path = "/api/export/reset-order/O-1"
+    headers = sign_request("POST", path, body=b"")
+    response = client.post(path, content=b'{"injected": true}', headers={**headers, "Content-Type": "application/json"})
+    assert response.status_code == 401
+
+
+def test_missing_body_digest_header_is_rejected(client, sign_request):
+    path = "/api/export/history"
+    headers = sign_request("GET", path)
+    headers.pop("X-Zconnect-Content-SHA256")
+    assert client.get(path, headers=headers).status_code == 401
+
+
+def test_body_digest_header_that_does_not_match_the_body_is_rejected(client, sign_request):
+    path = "/api/export/run-csv"
+    body, headers = _json_request(sign_request, "POST", path, {"orders": []}, role="user")
+    headers["X-Zconnect-Content-SHA256"] = "0" * 64
+    assert client.post(path, content=body, headers=headers).status_code == 401
+
+
+def test_signature_from_another_payload_cannot_be_replayed(client, sign_request, db):
+    seed_exported(db)
+    path = "/api/export/reset-selected-runs"
+    first_body, first_headers = _json_request(sign_request, "POST", path, {"run_ids": [2]})
+    assert client.post(path, content=first_body, headers=first_headers).status_code == 404  # run 2 does not exist
+    replay = json.dumps({"run_ids": [1]}).encode()
+    first_headers["X-Zconnect-Content-SHA256"] = __import__("hashlib").sha256(replay).hexdigest()
+    assert client.post(path, content=replay, headers=first_headers).status_code == 401
+
+
+def test_multipart_body_digest_covers_the_exact_bytes(client, sign_request):
+    boundary = "zconnectboundary"
+    crlf = "\r\n"
+    body = crlf.join(
+        [
+            f"--{boundary}",
+            'Content-Disposition: form-data; name="file"; filename="o.csv"',
+            "Content-Type: text/csv",
+            "",
+            "order_id,customer_name",
+            f"--{boundary}--",
+            "",
+        ]
+    ).encode()
+    path = "/api/unify/preview-csv"
+    headers = {**sign_request("POST", path, role="user", body=body), "Content-Type": f"multipart/form-data; boundary={boundary}"}
+    accepted = client.post(path, content=body, headers=headers)
+    assert accepted.status_code != 401  # authenticated; the handler processed the upload
+    altered = body.replace(b"order_id", b"order_ix")
+    assert client.post(path, content=altered, headers=headers).status_code == 401
+
+
+def test_rejection_logs_never_contain_body_or_secret(client, sign_request, caplog):
+    from tests.conftest import TEST_BACKEND_SECRET
+
+    path = "/api/export/run-csv"
+    body, headers = _json_request(sign_request, "POST", path, {"orders": [{"customer_name": "Very Secret Customer"}]}, role="user")
+    caplog.set_level("DEBUG")
+    client.post(path, content=body + b" ", headers=headers)
+    logged = " | ".join(record.getMessage() for record in caplog.records)
+    assert "Very Secret Customer" not in logged
+    assert TEST_BACKEND_SECRET not in logged

@@ -1,5 +1,6 @@
 // Server-side only: imported solely by route handlers (node:crypto cannot be bundled for browsers).
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
+import { rejectCrossSiteRequest } from "./request-origin";
 import { fetchCurrentUser, refreshSession } from "./supabase";
 
 // Server-to-server authentication for every request this Next.js server sends to the
@@ -12,7 +13,7 @@ import { fetchCurrentUser, refreshSession } from "./supabase";
 // The backend (app/security.py) rejects anything unsigned, tampered, replayed or expired.
 
 export const SESSION_COOKIE = "zconnect_session";
-const SIGNATURE_VERSION = "v1";
+const SIGNATURE_VERSION = "v2";
 const MIN_SECRET_LENGTH = 32;
 
 // Headers the client must never be able to set on a backend request.
@@ -21,6 +22,7 @@ const CLIENT_CONTROLLED_HEADERS = [
   "x-zconnect-role",
   "x-zconnect-timestamp",
   "x-zconnect-signature",
+  "x-zconnect-content-sha256",
   "x-zconnect-actor",
   "authorization",
   "cookie",
@@ -84,6 +86,10 @@ function sessionCookie(session: { access_token: string; refresh_token: string; e
 }
 
 export async function authenticateRequest(request: Request): Promise<AuthResult> {
+  const crossSite = rejectCrossSiteRequest(request);
+  if (crossSite) {
+    return { ok: false, response: crossSite };
+  }
   if (!backendSecret()) {
     console.error("[Security] ZCONNECT_BACKEND_SECRET is missing or too short; refusing backend requests");
     return { ok: false, response: jsonResponse(503, { detail: "Server security configuration is missing" }) };
@@ -115,8 +121,19 @@ export async function authenticateRequest(request: Request): Promise<AuthResult>
   };
 }
 
-/** Removes client-supplied identity/credential headers and adds the signed identity. */
-export function applySignedIdentity(headers: Headers, method: string, backendPath: string, query: string, user: AuthenticatedUser) {
+/**
+ * Removes client-supplied identity/credential headers and adds the signed identity.
+ * `body` must be the exact bytes that will be sent to the backend (empty for no body):
+ * their SHA-256 is part of the signature, so any change in transit is rejected.
+ */
+export function applySignedIdentity(
+  headers: Headers,
+  method: string,
+  backendPath: string,
+  query: string,
+  user: AuthenticatedUser,
+  body: Uint8Array = new Uint8Array(),
+) {
   for (const name of CLIENT_CONTROLLED_HEADERS) {
     headers.delete(name);
   }
@@ -125,10 +142,12 @@ export function applySignedIdentity(headers: Headers, method: string, backendPat
     throw new Error("ZCONNECT_BACKEND_SECRET is missing");
   }
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const message = [SIGNATURE_VERSION, method.toUpperCase(), backendPath, query, timestamp, user.id, user.role].join("\n");
+  const contentSha256 = createHash("sha256").update(body).digest("hex");
+  const message = [SIGNATURE_VERSION, method.toUpperCase(), backendPath, query, timestamp, user.id, user.role, contentSha256].join("\n");
   headers.set("x-zconnect-user", user.id);
   headers.set("x-zconnect-role", user.role);
   headers.set("x-zconnect-timestamp", timestamp);
+  headers.set("x-zconnect-content-sha256", contentSha256);
   headers.set("x-zconnect-signature", createHmac("sha256", secret).update(message, "utf8").digest("hex"));
 }
 

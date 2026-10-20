@@ -1,10 +1,15 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { rejectCrossSiteRequest } from "../../../../lib/request-origin";
 import { deleteAuthUser, fetchCurrentUser } from "../../../../lib/supabase";
 
 const SESSION_COOKIE = "zconnect_session";
 
-export async function DELETE(_request: Request, context: { params: { id: string } }) {
+export async function DELETE(request: Request, context: { params: { id: string } }) {
+  const crossSite = rejectCrossSiteRequest(request);
+  if (crossSite) {
+    return crossSite;
+  }
   const raw = cookies().get(SESSION_COOKIE)?.value;
   if (!raw) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });

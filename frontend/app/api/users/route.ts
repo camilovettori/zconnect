@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { rejectCrossSiteRequest } from "../../../lib/request-origin";
 import { createAuthUser, fetchCurrentUser, listAuthUsers } from "../../../lib/supabase";
 
 const SESSION_COOKIE = "zconnect_session";
@@ -48,6 +49,10 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const crossSite = rejectCrossSiteRequest(request);
+  if (crossSite) {
+    return crossSite;
+  }
   const admin = await requireAdmin();
   if (!admin) {
     return NextResponse.json({ error: "Admin access required" }, { status: 403 });

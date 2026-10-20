@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rejectCrossSiteRequest } from "../../../../lib/request-origin";
 import { loginWithPassword } from "../../../../lib/supabase";
 
 const SESSION_COOKIE = "zconnect_session";
@@ -10,6 +11,10 @@ const COOKIE_BASE = {
 };
 
 export async function POST(request: Request) {
+  const crossSite = rejectCrossSiteRequest(request);
+  if (crossSite) {
+    return crossSite;
+  }
   const body = await request.json().catch(() => ({}));
   const email = String(body?.email || "").trim();
   const password = String(body?.password || "");

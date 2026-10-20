@@ -59,15 +59,18 @@ def sign_request():
     """Build the signed identity headers the Next.js server would send."""
     import time
 
-    from app.security import compute_signature
+    from app.security import body_sha256, compute_signature
 
-    def _sign(method, path, query="", user_id="test-admin", role="admin", secret=TEST_BACKEND_SECRET, timestamp=None):
+    def _sign(method, path, query="", user_id="test-admin", role="admin", secret=TEST_BACKEND_SECRET, timestamp=None, body=b""):
+        """Headers for a request whose exact body bytes are `body` (send them with content=)."""
         ts = str(int(time.time()) if timestamp is None else timestamp)
-        signature = compute_signature(secret.encode("utf-8"), method, path, query, ts, user_id, role)
+        digest = body_sha256(body)
+        signature = compute_signature(secret.encode("utf-8"), method, path, query, ts, user_id, role, digest)
         return {
             "X-Zconnect-User": user_id,
             "X-Zconnect-Role": role,
             "X-Zconnect-Timestamp": ts,
+            "X-Zconnect-Content-SHA256": digest,
             "X-Zconnect-Signature": signature,
         }
 
