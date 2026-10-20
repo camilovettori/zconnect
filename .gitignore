@@ -16,6 +16,15 @@ out/
 .env.production
 .env.development
 
+# Local databases and database backups (may contain credentials and customer data)
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+*.dump
+
 # Editor / OS
 .DS_Store
 Thumbs.db
