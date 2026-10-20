@@ -1,0 +1,515 @@
+{
+ "description": "Schema created by app startup create_all only (no Alembic), as for databases that predate Alembic. PostgreSQL 17, release a6dfb2f models.",
+ "schema": {
+  "columns": [
+   [
+    "customer_mappings",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "customer_mappings",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('customer_mappings_id_seq')"
+   ],
+   [
+    "customer_mappings",
+    "unify_customer_name",
+    "character varying",
+    255,
+    "NO",
+    ""
+   ],
+   [
+    "customer_mappings",
+    "zoho_contact_id",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('exported_invoices_id_seq')"
+   ],
+   [
+    "exported_invoices",
+    "message",
+    "text",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "status",
+    "character varying",
+    32,
+    "NO",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "sync_run_id",
+    "integer",
+    null,
+    "NO",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "unify_customer_name",
+    "character varying",
+    255,
+    "NO",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "unify_order_ids",
+    "json",
+    null,
+    "NO",
+    ""
+   ],
+   [
+    "exported_invoices",
+    "zoho_invoice_id",
+    "character varying",
+    128,
+    "YES",
+    ""
+   ],
+   [
+    "exported_orders",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "exported_orders",
+    "customer_name",
+    "character varying",
+    255,
+    "YES",
+    ""
+   ],
+   [
+    "exported_orders",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('exported_orders_id_seq')"
+   ],
+   [
+    "exported_orders",
+    "message",
+    "text",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "exported_orders",
+    "status",
+    "character varying",
+    32,
+    "NO",
+    ""
+   ],
+   [
+    "exported_orders",
+    "sync_run_id",
+    "integer",
+    null,
+    "NO",
+    ""
+   ],
+   [
+    "exported_orders",
+    "unify_order_id",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "item_mappings",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "item_mappings",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('item_mappings_id_seq')"
+   ],
+   [
+    "item_mappings",
+    "unify_item_sku",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "item_mappings",
+    "zoho_item_id",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "settings",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "settings",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('settings_id_seq')"
+   ],
+   [
+    "settings",
+    "key",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "settings",
+    "updated_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "settings",
+    "value",
+    "text",
+    null,
+    "NO",
+    ""
+   ],
+   [
+    "sync_runs",
+    "date_from",
+    "character varying",
+    32,
+    "NO",
+    ""
+   ],
+   [
+    "sync_runs",
+    "date_to",
+    "character varying",
+    32,
+    "NO",
+    ""
+   ],
+   [
+    "sync_runs",
+    "errors",
+    "text",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "sync_runs",
+    "finished_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "sync_runs",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('sync_runs_id_seq')"
+   ],
+   [
+    "sync_runs",
+    "started_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "sync_runs",
+    "status",
+    "character varying",
+    32,
+    "NO",
+    ""
+   ],
+   [
+    "sync_runs",
+    "total_customers",
+    "integer",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "sync_runs",
+    "total_invoices",
+    "integer",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "sync_runs",
+    "total_orders",
+    "integer",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "created_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "id",
+    "integer",
+    null,
+    "NO",
+    "nextval('zoho_item_mappings_id_seq')"
+   ],
+   [
+    "zoho_item_mappings",
+    "tax_id",
+    "character varying",
+    128,
+    "YES",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "unify_product_key",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "unify_product_name",
+    "character varying",
+    255,
+    "YES",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "updated_at",
+    "timestamp without time zone",
+    null,
+    "YES",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "zoho_item_id",
+    "character varying",
+    128,
+    "NO",
+    ""
+   ],
+   [
+    "zoho_item_mappings",
+    "zoho_item_name",
+    "character varying",
+    255,
+    "YES",
+    ""
+   ]
+  ],
+  "constraints": [
+   [
+    "customer_mappings",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "customer_mappings",
+    "u",
+    "UNIQUE (unify_customer_name)"
+   ],
+   [
+    "exported_invoices",
+    "f",
+    "FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id)"
+   ],
+   [
+    "exported_invoices",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "exported_orders",
+    "f",
+    "FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id)"
+   ],
+   [
+    "exported_orders",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "exported_orders",
+    "u",
+    "UNIQUE (unify_order_id)"
+   ],
+   [
+    "item_mappings",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "item_mappings",
+    "u",
+    "UNIQUE (unify_item_sku)"
+   ],
+   [
+    "settings",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "sync_runs",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "zoho_item_mappings",
+    "p",
+    "PRIMARY KEY (id)"
+   ]
+  ],
+  "indexes": [
+   [
+    "customer_mappings",
+    "CREATE INDEX <name> ON public.customer_mappings USING btree (id)"
+   ],
+   [
+    "customer_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.customer_mappings USING btree (id)"
+   ],
+   [
+    "customer_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.customer_mappings USING btree (unify_customer_name)"
+   ],
+   [
+    "exported_invoices",
+    "CREATE INDEX <name> ON public.exported_invoices USING btree (id)"
+   ],
+   [
+    "exported_invoices",
+    "CREATE UNIQUE INDEX <name> ON public.exported_invoices USING btree (id)"
+   ],
+   [
+    "exported_orders",
+    "CREATE INDEX <name> ON public.exported_orders USING btree (id)"
+   ],
+   [
+    "exported_orders",
+    "CREATE UNIQUE INDEX <name> ON public.exported_orders USING btree (id)"
+   ],
+   [
+    "exported_orders",
+    "CREATE UNIQUE INDEX <name> ON public.exported_orders USING btree (unify_order_id)"
+   ],
+   [
+    "item_mappings",
+    "CREATE INDEX <name> ON public.item_mappings USING btree (id)"
+   ],
+   [
+    "item_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.item_mappings USING btree (id)"
+   ],
+   [
+    "item_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.item_mappings USING btree (unify_item_sku)"
+   ],
+   [
+    "settings",
+    "CREATE INDEX <name> ON public.settings USING btree (id)"
+   ],
+   [
+    "settings",
+    "CREATE UNIQUE INDEX <name> ON public.settings USING btree (id)"
+   ],
+   [
+    "settings",
+    "CREATE UNIQUE INDEX <name> ON public.settings USING btree (key)"
+   ],
+   [
+    "sync_runs",
+    "CREATE INDEX <name> ON public.sync_runs USING btree (id)"
+   ],
+   [
+    "sync_runs",
+    "CREATE UNIQUE INDEX <name> ON public.sync_runs USING btree (id)"
+   ],
+   [
+    "zoho_item_mappings",
+    "CREATE INDEX <name> ON public.zoho_item_mappings USING btree (id)"
+   ],
+   [
+    "zoho_item_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.zoho_item_mappings USING btree (id)"
+   ],
+   [
+    "zoho_item_mappings",
+    "CREATE UNIQUE INDEX <name> ON public.zoho_item_mappings USING btree (unify_product_key)"
+   ]
+  ]
+ }
+}
