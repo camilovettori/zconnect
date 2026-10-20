@@ -233,7 +233,7 @@ def test_alembic_0001_then_startup_matches_its_reference(scratch_db, monkeypatch
 
 
 @needs_postgres
-def test_guarded_runner_end_to_end_on_a_production_like_database(scratch_db, monkeypatch, capsys):
+def test_guarded_runner_end_to_end_on_a_production_like_database(scratch_db, monkeypatch, capsys, tmp_path):
     create_like_startup(scratch_db)
     execute(
         scratch_db,
@@ -248,6 +248,9 @@ def test_guarded_runner_end_to_end_on_a_production_like_database(scratch_db, mon
 
     _matched, pre_info = inspect(scratch_db)
     assert pre_info["settings_keys"] == [["ZOHO_BASE_URL", True], ["ZOHO_ORG_ID", True]]
+    snapshot_file = tmp_path / "pre_migration_snapshot.json"
+    assert preflight.main(["compare"]) == 0
+    assert preflight.main(["dump", str(snapshot_file)]) == 0
     assert runner.run(base + ["status"]) == 0
     assert runner.run(base + ["--backup-verified", "upgrade"]) == 2  # unversioned: must stamp first
     assert runner.run(base + ["stamp"]) == 2  # backup not confirmed
@@ -262,6 +265,10 @@ def test_guarded_runner_end_to_end_on_a_production_like_database(scratch_db, mon
         _schema, info = preflight.snapshot(conn)
         checks = preflight.postcheck(conn, info, pre_info)
     assert all(checks.values()), checks
+    assert preflight.main(["postcheck", str(snapshot_file)]) == 0
+    bom_copy = tmp_path / "snapshot_with_bom.json"  # e.g. saved by PowerShell Out-File -Encoding utf8
+    bom_copy.write_bytes(b"\xef\xbb\xbf" + snapshot_file.read_bytes())
+    assert preflight.main(["postcheck", str(bom_copy)]) == 0
     execute(scratch_db, "INSERT INTO export_events (tenant_id, unify_order_id, event_type) VALUES ('t', 'O-1', 'test')")
     with pytest.raises(Exception, match="append-only"):
         execute(scratch_db, "UPDATE export_events SET detail = 'changed'")

@@ -18,7 +18,7 @@ Safety:
 Usage (from backend/):
   python tools/schema_preflight.py target
   python tools/schema_preflight.py compare            # against both bundled references
-  python tools/schema_preflight.py dump > pre_migration_snapshot.json
+  python tools/schema_preflight.py dump pre_migration_snapshot.json
   python tools/schema_preflight.py postcheck pre_migration_snapshot.json
 """
 from __future__ import annotations
@@ -134,7 +134,7 @@ def load_references(paths: Optional[List[str]] = None) -> Dict[str, Dict[str, Li
     files = [Path(p) for p in paths] if paths else sorted(REFERENCE_DIR.glob("*.json"))
     if not files:
         raise PreflightError(f"No reference schemas found in {REFERENCE_DIR}")
-    return {f.stem: json.loads(f.read_text(encoding="utf-8"))["schema"] for f in files}
+    return {f.stem: json.loads(f.read_text(encoding="utf-8-sig"))["schema"] for f in files}
 
 
 def compare(schema: Dict[str, List[list]], references: Dict[str, Dict[str, List[list]]]) -> Tuple[Optional[str], Dict[str, List[str]]]:
@@ -182,10 +182,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         with connect_read_only(url) as conn:
             schema, info = snapshot(conn)
             if argv[0] == "dump":
-                print(json.dumps({"target": target, "schema": schema, "info": info}, indent=1, default=str))
+                document = json.dumps({"target": target, "schema": schema, "info": info}, indent=1, default=str)
+                if len(argv) > 1:
+                    # Written here as UTF-8: PowerShell 5.1 `>` redirection would produce UTF-16.
+                    Path(argv[1]).write_text(document + "\n", encoding="utf-8")
+                    print(f"snapshot written to {argv[1]}", file=sys.stderr)
+                else:
+                    print(document)
                 return 0
             if argv[0] == "postcheck":
-                pre_info = json.loads(Path(argv[1]).read_text(encoding="utf-8"))["info"]
+                pre_info = json.loads(Path(argv[1]).read_text(encoding="utf-8-sig"))["info"]
                 checks = postcheck(conn, info, pre_info)
                 for name, ok in checks.items():
                     print(f"{'PASS' if ok else 'FAIL'}  {name}")
