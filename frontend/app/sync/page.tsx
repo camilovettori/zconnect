@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import * as XLSX from "xlsx";
 import { AppShell } from "../../components/app-shell";
 import { useAppSession } from "../../components/app-session";
 import { formatCurrencyEur } from "../utils/money";
@@ -949,38 +948,6 @@ export default function SyncPage() {
       window.clearTimeout(timeoutId);
       setLoading(false);
     }
-  };
-
-  const readFileAsText = (file: File) =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result ?? ""));
-      reader.onerror = () => reject(new Error("Could not read the selected CSV file"));
-      reader.readAsText(file, "utf-8");
-    });
-
-  const readExcelAsCsvText = async (file: File) => {
-    const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: "array" });
-    const firstSheetName = workbook.SheetNames[0];
-    if (!firstSheetName) {
-      throw new Error("The Excel file does not contain any sheets");
-    }
-
-    const worksheet = workbook.Sheets[firstSheetName];
-    if (!worksheet) {
-      throw new Error("The first sheet in the Excel file is empty");
-    }
-
-    return XLSX.utils.sheet_to_csv(worksheet, { FS: ",", blankrows: false });
-  };
-
-  const readUploadAsCsvText = async (file: File) => {
-    const extension = `.${file.name.split(".").pop()?.toLowerCase() || ""}`;
-    if (extension === ".xlsx" || extension === ".xls") {
-      return readExcelAsCsvText(file);
-    }
-    return readFileAsText(file);
   };
 
   const previewCsvFile = async (file: File) => {
