@@ -59,7 +59,8 @@ After every settings change, open Render → **Events** and Vercel → **Deploym
 | Start command | Settings → Build & Deploy | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
 | Health check path | Settings → **Health Check Path** | **`/`** (🔒 to change). `/` is the only unauthenticated route (returns 200); any `/api/...` path returns 401 after this release and would fail the deploy |
 | Python version | latest build log (“Using Python version …”) | Note it. Tests ran on 3.13; `runtime.txt` says 3.12.8 |
-| `DATABASE_URL` | Environment | Present; Supabase **session pooler** (port 5432) of the production project. If missing, the app silently falls back to a local SQLite file |
+| `DATABASE_URL` | Environment | **Required.** Supabase **session pooler** (port 5432) of the production project. There is no default and no fallback: the backend refuses to start if it is missing, is not PostgreSQL, or the database is unreachable at boot (the error names scheme/host/port/database only, never credentials). Render then keeps the previous deploy running |
+| `ZCONNECT_ENVIRONMENT` | Environment | `production` (🔒, added in step W5 with the secret). Render's own `RENDER=true` already enables the PostgreSQL-only rule; the explicit value documents it and protects non-Render hosts. Unknown values (e.g. `prod`) are rejected at startup |
 | `ZCONNECT_BACKEND_SECRET` | Environment | Added **during the release window** (step W5), identical to Vercel's, ≥ 32 characters |
 | `ZCONNECT_BACKEND_SECRET_PREVIOUS` | Environment | Absent (only during a secret rotation) |
 | `ZCONNECT_ENABLE_API_DOCS` | Environment | Absent |
@@ -90,6 +91,23 @@ Without the secret, a Preview deployment fails closed: its API calls return 503 
 | Production project | Project URL `https://<PROJECT_REF>.supabase.co` | Same `<PROJECT_REF>` as Vercel's `SUPABASE_URL` and as the user `postgres.<PROJECT_REF>` in Render's `DATABASE_URL` |
 | Backups | Database → Backups | Latest daily backup (and PITR, if enabled) noted before the window |
 | Admin users | SQL editor (read-only): `select email, raw_app_meta_data->>'role' as role from auth.users order by email;` | Every operator who needs Reset / Reconcile / Settings / Users has role `admin` |
+| Data API exposure | Database → Data API / table settings, and the preflight's `WARNING:` lines | No Zconnect table reachable by `anon` / `authenticated` (list below) |
+
+**Zconnect tables that must not be reachable through the Data API** (the project's anon key is public: ZRecipe ships it to browsers):
+
+| Table | Holds | Status |
+|---|---|---|
+| `settings` | Zoho / Unify credentials | protected (reported 2026-10-20) |
+| `exported_orders` | idempotency records per order | protected (reported 2026-10-20) |
+| `sync_runs` | sync history | protected (reported 2026-10-20) |
+| `exported_invoices` | Zoho invoice ids, customer names, order lists | 🔒 **protect before go-live** |
+| `customer_mappings` | customer → Zoho contact ids | 🔒 **protect before go-live** |
+| `item_mappings` | SKU → Zoho item ids | 🔒 **protect before go-live** |
+| `zoho_item_mappings` | product → Zoho item ids and tax ids | 🔒 **protect before go-live** |
+| `zconnect_export_events` | audit trail (actor ids, invoice ids) | 🔒 created by the migration: **protect in step W4b**, before the backend is deployed |
+| `zconnect_alembic_version` | migration version | 🔒 created by the stamp: **protect in step W4b** |
+
+`public.export_events` was also removed from the Data API; it is not a Zconnect table (unknown owner) and Zconnect never uses it. New tables in `public` normally inherit Supabase's default grants to `anon` / `authenticated`, so the two tables the migration creates are exposed until W4b. The Zconnect backend connects as the table owner, so revoking API-role access (or enabling RLS without policies) does not affect it.
 
 Granting admin is a production change (🔒):
 ```sql
@@ -121,7 +139,7 @@ Both tools live in `backend/tools/` and are covered by `backend/tests/test_schem
 * `schema_preflight.py`: **read-only**. The session runs with `default_transaction_read_only=on` and a statement timeout, and selects only catalogs, row counts and setting **names**. Reports the target, the match of Zconnect's seven original tables against the bundled `0001_initial` references (`tools/schema_references/`), the state of Zconnect's migration objects (`zconnect_alembic_version`, `zconnect_export_events` compared exactly against `zconnect_export_events.json`), foreign objects (`public.export_events`, `public.alembic_version`, informational), status distributions, RLS state and Supabase API-role grants.
 * `run_migration.py`: guarded `stamp 0001_initial` / `upgrade 0002_export_events`. It refuses unless host, database and role match the expected values, `--backup-verified` is given, and the database is in the state the action requires (§3.3). It never upgrades to `head` and never touches objects without the `zconnect_` prefix other than Zconnect's seven original tables, which it does not modify either.
 
-Both read the URL **only** from the `DATABASE_URL` environment variable: never from `backend/.env`, never from the SQLite fallbacks in `app/config.py` or `alembic.ini`.
+Both read the URL **only** from the `DATABASE_URL` environment variable (never from `backend/.env`) and accept PostgreSQL only. The application itself has no default database and no SQLite fallback, and `alembic.ini` has no URL: a plain `alembic` command without a valid `DATABASE_URL` fails instead of migrating a local file.
 
 ### 3.1 Session setup (operator workstation, PowerShell)
 
@@ -157,7 +175,7 @@ The last line of `compare` states the database's state. Only the two *ready* sta
 
 Lines starting with `INFO:` describe foreign objects such as `public.export_events` (expected in production: 13 columns, 0 rows, 5 indexes, 0 custom triggers). They never block and are never modified. If their description changes between the preflight and the post-check, the post-check fails.
 
-Also read `rls_disabled_tables` and `api_role_grants`. Grants to `anon` / `authenticated` on public tables mean the Supabase Data API may expose them. Remediation is a separate, approved change and is not part of this release.
+`WARNING: Zconnect table public.<name> is accessible to anon/authenticated (...)` lists every Zconnect table the Supabase API roles can reach; `WARNING: row-level security is disabled on Zconnect tables: ...` lists those without RLS. Warnings never block the preflight or the post-check, but every Zconnect table must be protected (§2, Supabase) before go-live. The full `rls_disabled_tables` and `api_role_grants` lists also cover other applications' tables, for information.
 
 ### 3.4 Backup and restore verification (🔒 read-only export)
 
@@ -202,6 +220,8 @@ Remove-Item Env:DATABASE_URL
 ```
 All six checks must print `PASS`: `zconnect_alembic_version` is `0002_export_events`; `zconnect_export_events` matches the bundled definition exactly (columns, constraints, indexes, append-only trigger); it is empty; Zconnect's existing row counts and `exported_orders` statuses are unchanged; the foreign objects (`public.export_events`, `public.alembic_version`) are unchanged. On any `FAIL`: stay in maintenance, do not deploy, review.
 
+After the checks, `WARNING:` lines are expected for `zconnect_export_events` and `zconnect_alembic_version` (inherited default grants): they are resolved in step W4b.
+
 If the upgrade fails: verify with `compare` that the schema is unchanged, do not deploy the new backend, and end the window on the previous version.
 
 ---
@@ -212,11 +232,11 @@ If the upgrade fails: verify with `compare` that the schema is unchanged, do not
 
 | # | Step |
 |---|---|
+| P0 | Local: `git log --oneline -1 --grep "Isolate Zconnect migration objects" release` prints the isolation commit (otherwise **stop**: an older backend would collide with `public.export_events`), and `git rev-parse --short release` gives `<RELEASE_COMMIT>`. |
 | P1 | 🔒 Render: Auto-Deploy **Off**; Health Check Path `/`. Confirm no deploy started (Events). |
 | P2 | 🔒 Vercel: Production Branch → `release`; add `ZCONNECT_BACKEND_SECRET` (Production only); confirm Preview has neither the secret nor `SUPABASE_SERVICE_ROLE_KEY`. |
-| P0 | Local: `git log --oneline -1 --grep "Isolate Zconnect migration objects" release` prints the isolation commit (otherwise **stop**: an older backend would collide with `public.export_events`), and `git rev-parse --short release` gives `<RELEASE_COMMIT>`. |
 | P3 | 🔒 `git push origin main` (fast-forward; `main` and `release` point at `<RELEASE_COMMIT>`). Confirm Render started **no** deploy and Vercel created only a **Preview**. |
-| P4 | 🔒 Read-only preflight (§3.2, §3.3); admin roles checked (§2). |
+| P4 | 🔒 Read-only preflight (§3.2, §3.3); admin roles checked (§2). Protect the four remaining existing Zconnect tables (`exported_invoices`, `customer_mappings`, `item_mappings`, `zoho_item_mappings`) from the Data API, then rerun `compare`: no `WARNING: Zconnect table` line may remain. |
 
 ### Release window
 
@@ -226,7 +246,8 @@ If the upgrade fails: verify with `compare` that the schema is unchanged, do not
 | W2 | 🔒 Render: **Suspend** the service (stops the previous, unauthenticated API; no sync can run). |
 | W3 | 🔒 Snapshot, backup and restore verification (§3.4) until `RESTORE VERIFIED`. |
 | W4 | 🔒 Migration (§3.5) and post-migration checks (§3.6): all `PASS`. |
-| W5 | 🔒 Render: Environment → add `ZCONNECT_BACKEND_SECRET` (choose **Save only** if offered); confirm `DATABASE_URL` present and the docs flag absent → **Resume** → **Manual Deploy → Deploy a specific commit → `<RELEASE_COMMIT>`**. Logs must not show `zconnect_export_events table is missing` or `ZCONNECT_BACKEND_SECRET is missing`. Then run the backend checks below. |
+| W4b | 🔒 Supabase: protect `zconnect_export_events` and `zconnect_alembic_version` from the Data API (same method as P4). Rerun `& $py tools\schema_preflight.py compare`: no `WARNING: Zconnect table` line may remain. |
+| W5 | 🔒 Render: Environment → add `ZCONNECT_BACKEND_SECRET` and `ZCONNECT_ENVIRONMENT=production` (choose **Save only** if offered); confirm `DATABASE_URL` present and the docs flag absent → **Resume** → **Manual Deploy → Deploy a specific commit → `<RELEASE_COMMIT>`**. Logs must not show `zconnect_export_events table is missing`, `ZCONNECT_BACKEND_SECRET is missing`, `Configured database is unavailable` or `Production requires a PostgreSQL DATABASE_URL`. Then run the backend checks below. |
 | W6 | 🔒 `git push origin release` → Vercel builds production from `<RELEASE_COMMIT>`; confirm the deployment shows that commit. |
 | W7 | Read-only smoke tests (below). |
 | W8 | End the window. 🔒 The first controlled invoice synchronisation is a separate approval. |

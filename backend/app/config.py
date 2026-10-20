@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+from typing import Mapping, Optional
 
 from sqlalchemy.engine import make_url
 from pydantic import Field
@@ -8,6 +10,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 DATABASE_URL_INVALID_MESSAGE = (
     "Invalid DATABASE_URL format. Expected postgresql+psycopg://... or sqlite:///..."
 )
+ENVIRONMENTS = {"", "development", "test", "production"}
+
+
+class DatabaseConfigurationError(RuntimeError):
+    """DATABASE_URL is missing, malformed or not allowed in this environment. Never contains credentials."""
 
 
 def _clean_database_url(raw_url: str) -> str:
@@ -75,10 +82,45 @@ def get_database_url_log_details(normalized_url: str) -> dict[str, str | int | N
         return fallback
 
 
+def is_production(environment: str, environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Production when ZCONNECT_ENVIRONMENT=production or when running on Render (RENDER=true)."""
+    environ = os.environ if environ is None else environ
+    value = (environment or "").strip().lower()
+    if value not in ENVIRONMENTS:
+        raise DatabaseConfigurationError(
+            f"ZCONNECT_ENVIRONMENT={value!r} is not recognised; use production, development or test."
+        )
+    return value == "production" or (environ.get("RENDER") or "").strip().lower() == "true"
+
+
+def resolve_database_url(raw_url: str, environment: str = "", environ: Optional[Mapping[str, str]] = None) -> str:
+    """The only database URL the application may use. There is no implicit default and no fallback:
+    DATABASE_URL must be configured explicitly, and production accepts PostgreSQL only.
+    SQLite stays available for local development and tests when configured explicitly."""
+    if not _clean_database_url(raw_url or ""):
+        raise DatabaseConfigurationError(
+            "DATABASE_URL is not set. Production requires a PostgreSQL URL; for local development set "
+            "DATABASE_URL=sqlite:///./unify_zoho.db explicitly."
+        )
+    try:
+        normalized = normalize_database_url(raw_url)
+    except ValueError:
+        raise DatabaseConfigurationError(DATABASE_URL_INVALID_MESSAGE) from None
+    if is_production(environment, environ) and not normalized.startswith("postgresql+psycopg://"):
+        scheme = get_database_url_log_details(normalized)["scheme"]
+        raise DatabaseConfigurationError(
+            f"Production requires a PostgreSQL DATABASE_URL (configured scheme: {scheme}). Refusing to start."
+        )
+    return normalized
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
-    DATABASE_URL: str = Field(default="sqlite:///./unify_zoho.db")
+    # No default: an unset DATABASE_URL must never silently select a local database.
+    DATABASE_URL: str = Field(default="")
+    # "production" enables the PostgreSQL-only rule (also implied on Render by RENDER=true).
+    ZCONNECT_ENVIRONMENT: str = Field(default="")
     UNIFY_BASE_URL: str = Field(default="https://api.unifyordering.com")
     UNIFY_CLIENT_ID: str = Field(default="")
     UNIFY_CLIENT_SECRET: str = Field(default="")
@@ -99,7 +141,7 @@ class Settings(BaseSettings):
 
     @property
     def normalized_database_url(self) -> str:
-        return normalize_database_url(self.DATABASE_URL)
+        return resolve_database_url(self.DATABASE_URL, self.ZCONNECT_ENVIRONMENT)
 
 
 settings = Settings()

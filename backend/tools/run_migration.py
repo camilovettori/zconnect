@@ -59,7 +59,11 @@ def _alembic_config(url: str):
     sqlalchemy_url = "postgresql+psycopg://" + url[len("postgresql://"):]
     # alembic/env.py takes its URL from the app settings; refuse unless they resolve to
     # exactly the verified target (environment variables take precedence over .env).
-    if normalize_database_url(settings.DATABASE_URL) != normalize_database_url(sqlalchemy_url):
+    try:
+        same_target = normalize_database_url(settings.DATABASE_URL) == normalize_database_url(sqlalchemy_url)
+    except ValueError:
+        same_target = False
+    if not same_target:
         raise MigrationRefused("app settings resolve to a different DATABASE_URL than the verified target")
     config = Config()  # no ini file: no logging reconfiguration, no sqlite fallback URL
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))

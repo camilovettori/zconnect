@@ -19,8 +19,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
+# The URL always comes from the application's resolved DATABASE_URL (explicit, no fallback,
+# PostgreSQL-only in production); alembic.ini deliberately has no sqlalchemy.url.
 def run_migrations_offline():
-    url = settings.normalized_database_url or config.get_main_option("sqlalchemy.url")
+    url = settings.normalized_database_url
     context.configure(url=url, target_metadata=target_metadata, literal_binds=True, version_table=ALEMBIC_VERSION_TABLE)
 
     with context.begin_transaction():
@@ -28,7 +30,7 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
-    config.set_main_option("sqlalchemy.url", settings.normalized_database_url or config.get_main_option("sqlalchemy.url"))
+    config.set_main_option("sqlalchemy.url", settings.normalized_database_url)
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",

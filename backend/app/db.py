@@ -1,8 +1,8 @@
 import logging
-from pathlib import Path
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -14,58 +14,61 @@ logger = logging.getLogger(__name__)
 # lives in its own version table instead of the generic alembic_version.
 ALEMBIC_VERSION_TABLE = "zconnect_alembic_version"
 
-normalized_database_url = settings.normalized_database_url
-try:
-    database_url_details = get_database_url_log_details(normalized_database_url)
-except Exception:
-    database_url_details = {
-        "scheme": "unknown",
-        "host": "unparseable",
-        "port": None,
-        "database": None,
-    }
-
-logger.info(
-    "Using DATABASE_URL: scheme=%s host=%s port=%s database=%s",
-    database_url_details["scheme"],
-    database_url_details["host"],
-    database_url_details["port"],
-    database_url_details["database"],
-)
-
-def _create_engine_for_url(database_url: str):
-    return create_engine(
-        database_url,
-        connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {},
-        future=True,
-    )
+# PostgreSQL connections fail fast instead of hanging startup on an unreachable host.
+POSTGRES_CONNECT_TIMEOUT_SECONDS = 10
 
 
-def _validate_engine(engine):
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
+class DatabaseUnavailableError(RuntimeError):
+    """The configured database cannot be reached. Never contains credentials."""
 
 
-def _fallback_sqlite_url() -> str:
-    fallback_path = (Path(__file__).resolve().parents[1] / "unify_zoho.db").resolve()
-    return f"sqlite:///{fallback_path.as_posix()}"
+def describe_database_url(database_url: str) -> str:
+    """Scheme, host, port and database only: never the user name or password."""
+    try:
+        details = get_database_url_log_details(database_url)
+    except Exception:
+        return "scheme=unknown host=unparseable port=None database=None"
+    return f"scheme={details['scheme']} host={details['host']} port={details['port']} database={details['database']}"
 
 
-engine = _create_engine_for_url(normalized_database_url)
-try:
-    _validate_engine(engine)
-except OperationalError as exc:
-    if normalized_database_url.startswith("sqlite"):
-        raise
-    fallback_url = _fallback_sqlite_url()
-    logger.warning(
-        "Primary DATABASE_URL is unreachable; falling back to local SQLite database=%s reason=%s",
-        fallback_url,
-        exc,
-    )
-    engine = _create_engine_for_url(fallback_url)
-    _validate_engine(engine)
-    logger.info("SQLite fallback database is ready")
+def _redacted_reason(exc: BaseException, database_url: str) -> str:
+    original = getattr(exc, "orig", None) or exc
+    reason = (str(original).strip().splitlines() or [type(original).__name__])[0]
+    try:
+        password = make_url(database_url).password
+    except Exception:
+        password = None
+    if password:
+        reason = reason.replace(str(password), "***")
+    return f"{type(original).__name__}: {reason}"
+
+
+def create_validated_engine(database_url: str):
+    """Create the engine for the configured database and prove it is reachable.
+
+    There is deliberately no fallback: if the configured database cannot be reached the
+    application must not start (a different, empty database would hide existing exports
+    and break invoice idempotency)."""
+    if database_url.startswith("sqlite"):
+        connect_args = {"check_same_thread": False}
+    else:
+        connect_args = {"connect_timeout": POSTGRES_CONNECT_TIMEOUT_SECONDS}
+    engine = create_engine(database_url, connect_args=connect_args, future=True)
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        engine.dispose()
+        raise DatabaseUnavailableError(
+            f"Configured database is unavailable ({describe_database_url(database_url)}): "
+            f"{_redacted_reason(exc, database_url)}. Startup aborted; there is no fallback database."
+        ) from None
+    return engine
+
+
+normalized_database_url = settings.normalized_database_url  # raises DatabaseConfigurationError when not allowed
+logger.info("Using DATABASE_URL: %s", describe_database_url(normalized_database_url))
+engine = create_validated_engine(normalized_database_url)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()

@@ -59,6 +59,9 @@ TARGET_REVISION = "0002_export_events"
 FOREIGN_TABLES = ("export_events", "alembic_version")
 
 READY_STATES = ("ready_to_stamp", "ready_to_upgrade")
+# Every table Zconnect owns: none of them may be reachable by Supabase's API roles.
+ZCONNECT_TABLES = APP_TABLES + [AUDIT_TABLE, VERSION_TABLE]
+API_ROLES = ("anon", "authenticated")
 
 
 class PreflightError(RuntimeError):
@@ -186,6 +189,16 @@ def snapshot(conn: psycopg.Connection) -> Tuple[Dict[str, List[list]], Dict[str,
                where table_schema = 'public' and grantee in ('anon', 'authenticated')
                group by 1, 2 order by 1, 2"""),
     }
+    # Zconnect tables reachable by Supabase API roles (warning only; never changed here).
+    info["zconnect_api_exposure"] = q(
+        """select table_name, grantee, string_agg(privilege_type, ',' order by privilege_type)
+           from information_schema.role_table_grants
+           where table_schema = 'public' and table_name = any(%s) and grantee = any(%s)
+           group by 1, 2 order by 1, 2""",
+        ZCONNECT_TABLES,
+        list(API_ROLES),
+    )
+    info["zconnect_tables_without_rls"] = [t for t in info["rls_disabled_tables"] if t in ZCONNECT_TABLES]
     if _exists(q, "settings"):
         # Names and a set/empty flag only; values are never selected.
         info["settings_keys"] = q("select key, coalesce(length(value), 0) > 0 from settings order by key")
@@ -304,6 +317,13 @@ def _print_foreign(info: Dict[str, Any]) -> None:
             )
 
 
+def _print_exposure(info: Dict[str, Any]) -> None:
+    for table, grantee, privileges in info.get("zconnect_api_exposure", []):
+        print(f"WARNING: Zconnect table public.{table} is accessible to {grantee} ({privileges}) through the Supabase Data API grants")
+    if info.get("zconnect_tables_without_rls"):
+        print(f"WARNING: row-level security is disabled on Zconnect tables: {', '.join(info['zconnect_tables_without_rls'])}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in ("target", "dump", "compare", "postcheck") or (argv[0] == "postcheck" and len(argv) != 2):
@@ -321,6 +341,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 checks = postcheck(conn, info, pre_info)
                 for name, ok in checks.items():
                     print(f"{'PASS' if ok else 'FAIL'}  {name}")
+                _print_exposure(info)  # new tables inherit default grants: protect them before go-live
                 passed = all(checks.values())
                 print("POST-MIGRATION CHECKS PASSED" if passed else "POST-MIGRATION CHECKS FAILED: stay in maintenance and review")
                 return 0 if passed else 1
@@ -343,6 +364,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"    {line}")
     print(json.dumps(info, indent=1, default=str))
     _print_foreign(info)
+    _print_exposure(info)
     for problem in assessment["problems"]:
         print(f"PROBLEM: {problem}")
     print(assessment["verdict"])

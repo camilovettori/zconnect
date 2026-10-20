@@ -256,12 +256,12 @@ def scratch_db():
         pytest.fail("Refusing to run: ZCONNECT_TEST_POSTGRES_URL must be a local *test* PostgreSQL database")
     name = f"zconnect_test_preflight_{uuid.uuid4().hex[:8]}"
     admin = url.set(drivername="postgresql").render_as_string(hide_password=False)
-    with psycopg.connect(admin, autocommit=True) as conn:
+    with psycopg.connect(admin, autocommit=True, connect_timeout=5) as conn:
         conn.execute(f'CREATE DATABASE "{name}"')
     try:
         yield url.set(database=name).render_as_string(hide_password=False)
     finally:
-        with psycopg.connect(admin, autocommit=True) as conn:
+        with psycopg.connect(admin, autocommit=True, connect_timeout=5) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
@@ -305,7 +305,9 @@ def add_foreign_application_objects(url: str) -> None:
         "CREATE TABLE alembic_version (version_num varchar(32) NOT NULL PRIMARY KEY)",
         "INSERT INTO alembic_version VALUES ('other_app_0042')",
         "CREATE TABLE recipes (id uuid PRIMARY KEY, name text)",
+        "INSERT INTO recipes VALUES ('00000000-0000-0000-0000-000000000001', 'Sourdough')",
         "ALTER TABLE recipes ENABLE ROW LEVEL SECURITY",
+        "CREATE POLICY recipes_owner ON recipes USING (true)",
     )
 
 
@@ -319,6 +321,9 @@ def foreign_definition(url: str) -> dict:
             "rows": q("select count(*) from export_events"),
             "alembic_version": q("select version_num from alembic_version"),
             "recipes_rls": q("select relrowsecurity from pg_class where oid = 'public.recipes'::regclass"),
+            "recipes_columns": q("select column_name, data_type from information_schema.columns where table_name = 'recipes' order by ordinal_position"),
+            "recipes_rows": q("select id::text, name from recipes order by id"),
+            "recipes_policies": q("select policyname, qual from pg_policies where tablename = 'recipes'"),
         }
 
 
@@ -467,3 +472,37 @@ def test_guarded_runner_refuses_to_stamp_a_drifted_schema(scratch_db, target_env
     target_env(scratch_db)
     assert run_status(scratch_db, "--backup-verified", "stamp") == 2
     assert inspect(scratch_db)[1]["zconnect_alembic_version"] is None
+
+
+@needs_postgres
+def test_api_exposure_warnings_follow_supabase_default_grants(scratch_db, target_env, capsys, tmp_path):
+    """Supabase grants anon/authenticated on new public tables by default. The preflight must
+    warn about every Zconnect table those roles can reach, including the two tables the
+    migration creates, while the tables already protected in production stay silent."""
+    with psycopg.connect(libpq(scratch_db), autocommit=True) as conn:
+        for role in preflight.API_ROLES:
+            if not conn.execute("select 1 from pg_roles where rolname = %s", (role,)).fetchone():
+                conn.execute(f"CREATE ROLE {role} NOLOGIN")
+        conn.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated")
+    create_like_startup(scratch_db)
+    add_foreign_application_objects(scratch_db)
+    # Mirrors production: these were removed from the Data API, the others were not.
+    execute(scratch_db, "REVOKE ALL ON settings, exported_orders, sync_runs, export_events FROM anon, authenticated")
+    target_env(scratch_db)
+
+    assert preflight.main(["compare"]) == 0
+    out = capsys.readouterr().out
+    warned = {line.split("public.")[1].split(" ")[0] for line in out.splitlines() if line.startswith("WARNING: Zconnect table")}
+    assert warned == {"exported_invoices", "customer_mappings", "item_mappings", "zoho_item_mappings"}
+    assert "WARNING: row-level security is disabled on Zconnect tables" in out
+
+    snapshot_file = tmp_path / "pre.json"
+    assert preflight.main(["dump", str(snapshot_file)]) == 0
+    assert run_status(scratch_db, "--backup-verified", "stamp") == 0
+    assert run_status(scratch_db, "--backup-verified", "upgrade") == 0
+    capsys.readouterr()
+    assert preflight.main(["postcheck", str(snapshot_file)]) == 0  # warnings never block the post-check
+    out = capsys.readouterr().out
+    warned_after = {line.split("public.")[1].split(" ")[0] for line in out.splitlines() if line.startswith("WARNING: Zconnect table")}
+    assert {"zconnect_export_events", "zconnect_alembic_version"} <= warned_after  # inherited default grants
+    assert "settings" not in warned_after
