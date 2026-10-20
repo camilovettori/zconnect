@@ -67,6 +67,9 @@ class UnifyOrderPreview(BaseModel):
     preview_status: str = "ready"
     preview_reason: str = ""
     already_exported: bool = False
+    # Stored exported_orders.status when a record exists (exported, failed, skipped,
+    # needs_verification, in_progress). Informational; already_exported is unchanged.
+    export_status: Optional[str] = None
 
 
 class UnifyOrder(BaseModel):
@@ -83,6 +86,9 @@ class UnifyOrder(BaseModel):
     preview_status: str = "ready"
     preview_reason: str = ""
     already_exported: bool = False
+    # Stored exported_orders.status when a record exists (exported, failed, skipped,
+    # needs_verification, in_progress). Informational; already_exported is unchanged.
+    export_status: Optional[str] = None
     total_net_amount: float = 0.0
     total_vat_amount: float = 0.0
     total_delivery_fee: float = 0.0

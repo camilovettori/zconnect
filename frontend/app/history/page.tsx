@@ -49,6 +49,11 @@ type ResetResponseData = {
   requested_run_ids?: number[];
   found_run_ids?: number[];
   missing_run_ids?: number[];
+  // Soft reset: records are kept and marked "reset"; the deleted_* fields are always 0.
+  reset_exported_orders?: number;
+  already_reset_orders?: number;
+  blocked_orders?: number;
+  blocked_order_ids?: string[];
   deleted_exported_orders?: number;
   deleted_exported_invoices?: number;
   updated_sync_runs?: number;
@@ -69,6 +74,9 @@ const STATUS_TONES: Record<string, StatusTone> = {
   skipped: "blocked",
   pending: "neutral",
   not_synced: "neutral",
+  needs_verification: "review",
+  in_progress: "running",
+  reset: "neutral",
 };
 
 // Filter chip order; statuses not listed here follow alphabetically.
@@ -188,19 +196,27 @@ function cleanMessage(value: unknown) {
 }
 
 function formatResetNotice(data: ResetResponseData, requestedCount: number) {
+  // Soft reset: nothing is deleted. Orders are marked for re-sync; Zoho invoices, run totals
+  // and history are kept, and every re-sync checks Zoho before creating an invoice.
   const foundCount = data.found_run_ids?.length ?? requestedCount;
   const missingCount = data.missing_run_ids?.length ?? 0;
-  const deletedOrders = data.deleted_exported_orders ?? 0;
-  const deletedInvoices = data.deleted_exported_invoices ?? 0;
-  const updatedRuns = data.updated_sync_runs ?? foundCount;
-  const missingMessage = missingCount === 1 ? "selected run was not found" : "selected runs were not found";
+  const resetOrders = data.reset_exported_orders ?? 0;
+  const alreadyReset = data.already_reset_orders ?? 0;
+  const blocked = data.blocked_orders ?? 0;
 
-  const headline = `${pluralize(updatedRuns, "run")} reset successfully`;
-  if (!missingCount) {
-    return `${headline}. Removed ${pluralize(deletedOrders, "order record")} and ${pluralize(deletedInvoices, "invoice record")}.`;
+  const parts = [
+    `${pluralize(foundCount, "run")} reset: ${pluralize(resetOrders, "order")} marked for re-sync. Zoho invoices and history were kept`,
+  ];
+  if (alreadyReset) {
+    parts.push(`${pluralize(alreadyReset, "order")} ${alreadyReset === 1 ? "was" : "were"} already reset`);
   }
-
-  return `${headline}. Removed ${pluralize(deletedOrders, "order record")} and ${pluralize(deletedInvoices, "invoice record")}. ${missingMessage}.`;
+  if (blocked) {
+    parts.push(`${pluralize(blocked, "order")} ${blocked === 1 ? "needs" : "need"} checking in Zoho and ${blocked === 1 ? "was" : "were"} left unchanged`);
+  }
+  if (missingCount) {
+    parts.push(missingCount === 1 ? "1 selected run was not found" : `${missingCount} selected runs were not found`);
+  }
+  return `${parts.join(". ")}.`;
 }
 
 function normalizeHistoryResponse(data: HistoryResponse): HistoryItem[] {
@@ -451,7 +467,7 @@ export default function HistoryPage() {
         <PageHeader
           eyebrow="History"
           title="Sync history"
-          description="Review previous sync runs, inspect the orders and invoices they produced, and reset runs so their orders can be synced again."
+          description="Review previous sync runs, inspect the orders and invoices they produced, and reset runs so their orders can be re-synced safely. Resets never delete invoices or history."
         />
 
         {notice && (
@@ -841,8 +857,12 @@ export default function HistoryPage() {
             </>
           }
         >
-          <p>Are you sure you want to reset the selected sync runs?</p>
-          <p className="mt-2">This will remove their sync records and allow them to be processed again.</p>
+          <p>The orders in the selected runs will be marked for re-sync.</p>
+          <p className="mt-2">
+            Nothing is deleted: Zoho invoices, run totals and history are kept. When an order is synced again, Zconnect
+            checks Zoho first and links an existing invoice instead of creating a duplicate. Orders that need checking in
+            Zoho are left unchanged.
+          </p>
           {pendingResetRunIds.length > 0 && (
             <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
               <span className="font-medium text-slate-900">{pluralize(pendingResetRunIds.length, "run")}:</span>{" "}

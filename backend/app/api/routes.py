@@ -28,7 +28,15 @@ from ..schemas import (
 from ..services.unify_service import UnifyService, make_unify_service, UnifyServiceError
 from ..services import csv_parser
 from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
-from ..services.export_service import make_export_service, ExportService, ExportServiceError
+from ..services.export_service import (
+    AuditContext,
+    EXPORT_STATUS_RESET,
+    ExportService,
+    ExportServiceError,
+    ReconcileError,
+    make_export_service,
+    soft_reset_export_records,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -143,10 +151,12 @@ def _customer_display_label(order: Any) -> str:
 
 
 def _build_preview_response_payload(orders, db: Session, debug_summary: dict | None = None, *, request_started_at: datetime | None = None, source: str = "unify") -> dict:
-    exported_order_ids = {
-        row[0]
-        for row in db.query(models.ExportedOrder.unify_order_id).all()
+    export_statuses = {
+        row[0]: row[1]
+        for row in db.query(models.ExportedOrder.unify_order_id, models.ExportedOrder.status).all()
     }
+    # Every record blocks re-export except a soft reset, whose next sync checks Zoho first.
+    exported_order_ids = {order_id for order_id, record_status in export_statuses.items() if record_status != EXPORT_STATUS_RESET}
 
     customer_info: dict[str, dict[str, float | int]] = {}
     preview_count = len(orders)
@@ -154,7 +164,9 @@ def _build_preview_response_payload(orders, db: Session, debug_summary: dict | N
     blocked_in_range_count = 0
 
     for order in orders:
+        # Any existing record keeps blocking re-export (unchanged); export_status says why.
         order.already_exported = order.order_id in exported_order_ids
+        order.export_status = export_statuses.get(order.order_id)
         customer_key = _customer_display_label(order)
         info = customer_info.setdefault(customer_key, {"order_count": 0, "total": 0.0})
         info["order_count"] += 1
@@ -419,14 +431,16 @@ async def fetch_orders(request: FetchOrdersRequest, db: Session = Depends(get_db
             len(orders),
             preview_duration_seconds,
         )
-        exported_order_ids = {
-            row[0]
-            for row in db.query(models.ExportedOrder.unify_order_id).all()
+        export_statuses = {
+            row[0]: row[1]
+            for row in db.query(models.ExportedOrder.unify_order_id, models.ExportedOrder.status).all()
         }
+        exported_order_ids = {order_id for order_id, record_status in export_statuses.items() if record_status != EXPORT_STATUS_RESET}
 
         customer_info = {}
         for order in orders:
             order.already_exported = order.order_id in exported_order_ids
+            order.export_status = export_statuses.get(order.order_id)
             info = customer_info.setdefault(order.customer_name, {"order_count": 0, "total": 0.0})
             info["order_count"] += 1
             info["total"] += order.total
@@ -649,7 +663,7 @@ async def debug_unify_samples(date_from: str, date_to: str, order_id: str | None
 
 
 @router.post("/export/run")
-async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
+async def run_export(request: ExportRunRequest, db: Session = Depends(get_db), http_request: Request = None):
     logger.info("Unify export-run route entered")
     logger.info("Unify export-run request received date_from=%s date_to=%s", request.date_from, request.date_to)
     date_from = _normalize_request_date(request.date_from, "date_from")
@@ -671,6 +685,7 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
     )
 
     export_service = make_export_service(unify, zoho)
+    export_service.audit = _audit_context(db, http_request)
 
     try:
         sync_started_at = datetime.utcnow()
@@ -738,7 +753,7 @@ async def run_export(request: ExportRunRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/export/run-csv")
-async def run_export_csv(request: ExportCsvRunRequest, db: Session = Depends(get_db)):
+async def run_export_csv(request: ExportCsvRunRequest, db: Session = Depends(get_db), http_request: Request = None):
     logger.info("Unify export-run-csv route entered order_count=%s", len(request.orders))
     if not request.orders:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="orders is required")
@@ -757,6 +772,7 @@ async def run_export_csv(request: ExportCsvRunRequest, db: Session = Depends(get
         org_id=settings.get("ZOHO_ORG_ID", ""),
     )
     export_service = make_export_service(unify, zoho)
+    export_service.audit = _audit_context(db, http_request)
     date_from, date_to = _derive_csv_export_range(request.orders, request.date_from, request.date_to)
     logger.info(
         "Unify export-run-csv derived date range date_from=%s date_to=%s order_ids=%s",
@@ -873,83 +889,85 @@ async def export_history_detail(id: int, db: Session = Depends(get_db)):
     }
 
 
+ACTOR_HEADER = "x-zconnect-actor"
+
+
+def _audit_context(db: Session, http_request: Request | None) -> AuditContext:
+    """Tenant + actor for export events.
+
+    tenant_id: TENANT_ID setting, else the configured Zoho organisation id, else "default"
+    (each deployment serves one company). actor_id: the signed-in user id that the Next.js
+    proxy attaches after validating the session; the proxy strips any client-supplied value.
+    """
+    configured = {
+        row.key: (row.value or "").strip()
+        for row in db.query(models.Setting).filter(models.Setting.key.in_(["TENANT_ID", "ZOHO_ORG_ID"])).all()
+    }
+    tenant_id = (configured.get("TENANT_ID") or configured.get("ZOHO_ORG_ID") or "default")[:64]
+    actor_id = None
+    if http_request is not None:
+        raw_actor = (http_request.headers.get(ACTOR_HEADER) or "").strip()
+        actor_id = raw_actor[:128] or None
+    return AuditContext(tenant_id=tenant_id, actor_id=actor_id)
+
+
+def _export_record_counts(db: Session) -> dict:
+    return {
+        "exported_orders": db.query(models.ExportedOrder).count(),
+        "exported_invoices": db.query(models.ExportedInvoice).count(),
+        "sync_runs": db.query(models.SyncRun).count(),
+    }
+
+
+def _soft_reset_response_data(outcome: dict, before: dict, after: dict) -> dict:
+    # Soft reset: nothing is deleted and sync runs are not rewritten. The legacy
+    # deleted_* / updated_sync_runs keys are kept (always 0) for older clients.
+    return {
+        "reset_exported_orders": len(outcome["reset"]),
+        "already_reset_orders": len(outcome["already_reset"]),
+        "blocked_orders": len(outcome["blocked"]),
+        "blocked_order_ids": outcome["blocked"],
+        "deleted_exported_orders": 0,
+        "deleted_exported_invoices": 0,
+        "updated_sync_runs": 0,
+        "before": before,
+        "after": after,
+    }
+
+
 @router.post("/export/reset-sync-state", response_model=APIResponse)
-async def reset_sync_state(db: Session = Depends(get_db)):
-    logger.warning("Export sync-state reset requested")
-    before_sync_runs = db.query(models.SyncRun).count()
-    before_exported_orders = db.query(models.ExportedOrder).count()
-    before_exported_invoices = db.query(models.ExportedInvoice).count()
-
+async def reset_sync_state(db: Session = Depends(get_db), http_request: Request = None):
+    """Soft-reset every export record. Nothing is deleted; invoices, run totals and
+    history are kept; records that need Zoho verification are left unchanged."""
+    logger.warning("Export sync-state soft reset requested")
+    before = _export_record_counts(db)
     try:
-        db.query(models.ExportedOrder).delete(synchronize_session=False)
-        db.query(models.ExportedInvoice).delete(synchronize_session=False)
-
-        db.query(models.SyncRun).update(
-            {
-                models.SyncRun.status: "pending",
-                models.SyncRun.total_invoices: 0,
-                models.SyncRun.errors: None,
-                models.SyncRun.finished_at: None,
-            },
-            synchronize_session=False,
-        )
-
-        db.commit()
-
-        after_sync_runs = db.query(models.SyncRun).count()
-        after_exported_orders = db.query(models.ExportedOrder).count()
-        after_exported_invoices = db.query(models.ExportedInvoice).count()
-
+        records = db.query(models.ExportedOrder).all()
+        outcome = soft_reset_export_records(db, records, source="reset all", audit=_audit_context(db, http_request))
+        after = _export_record_counts(db)
         logger.warning(
-            "Export sync-state reset completed before_sync_runs=%s before_exported_orders=%s before_exported_invoices=%s after_sync_runs=%s after_exported_orders=%s after_exported_invoices=%s",
-            before_sync_runs,
-            before_exported_orders,
-            before_exported_invoices,
-            after_sync_runs,
-            after_exported_orders,
-            after_exported_invoices,
+            "Export sync-state soft reset completed reset=%s already_reset=%s blocked=%s before=%s after=%s",
+            len(outcome["reset"]),
+            len(outcome["already_reset"]),
+            outcome["blocked"],
+            before,
+            after,
         )
-
-        return APIResponse(
-            ok=True,
-            message="Sync state reset",
-            data={
-                "before": {
-                    "exported_orders": before_exported_orders,
-                    "exported_invoices": before_exported_invoices,
-                    "sync_runs": before_sync_runs,
-                },
-                "after": {
-                    "exported_orders": after_exported_orders,
-                    "exported_invoices": after_exported_invoices,
-                    "sync_runs": after_sync_runs,
-                },
-                "sync_run_status_set_to": "pending",
-                "total_invoices_set_to": 0,
-                "errors_cleared": True,
-            },
-        )
+        return APIResponse(ok=True, message="Sync state reset; existing records were kept", data=_soft_reset_response_data(outcome, before, after))
     except Exception as exc:
         db.rollback()
-        logger.exception("Export sync-state reset failed before_sync_runs=%s before_exported_orders=%s before_exported_invoices=%s", before_sync_runs, before_exported_orders, before_exported_invoices)
+        logger.exception("Export sync-state soft reset failed before=%s", before)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "ok": False,
-                "message": "Sync state reset failed",
-                "error": str(exc),
-                "before": {
-                    "exported_orders": before_exported_orders,
-                    "exported_invoices": before_exported_invoices,
-                    "sync_runs": before_sync_runs,
-                },
-            },
+            content={"ok": False, "message": "Sync state reset failed", "error": str(exc), "before": before},
         )
 
 
 @router.post("/export/reset-order/{order_id}", response_model=APIResponse)
-async def reset_order(order_id: str, db: Session = Depends(get_db)):
-    logger.warning("Export single-order reset requested order_id=%s", order_id)
+async def reset_order(order_id: str, db: Session = Depends(get_db), http_request: Request = None):
+    """Soft-reset one order (Unsync). The record, its invoice id and its history are kept;
+    the next sync checks Zoho first and links an existing invoice instead of creating one."""
+    logger.warning("Export single-order soft reset requested order_id=%s", order_id)
     exported_order = (
         db.query(models.ExportedOrder)
         .filter(models.ExportedOrder.unify_order_id == order_id)
@@ -958,16 +976,27 @@ async def reset_order(order_id: str, db: Session = Depends(get_db)):
     if not exported_order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found in export history")
 
-    db.delete(exported_order)
-    db.commit()
-    logger.warning("Export single-order reset completed order_id=%s", order_id)
-    return APIResponse(ok=True, message="Order unsynced", data={"order_id": order_id})
+    previous_status = exported_order.status
+    outcome = soft_reset_export_records(db, [exported_order], source="unsync", audit=_audit_context(db, http_request))
+    if order_id in outcome["blocked"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This order may already have a Zoho invoice and must be checked in Zoho before it can be reset",
+        )
+    logger.warning("Export single-order soft reset completed order_id=%s previous_status=%s", order_id, previous_status)
+    return APIResponse(
+        ok=True,
+        message="Order reset; the next sync will check Zoho before creating an invoice",
+        data={"order_id": order_id, "previous_status": previous_status, "status": EXPORT_STATUS_RESET},
+    )
 
 
 @router.post("/export/reset-selected-runs", response_model=ResetSelectedRunsResponse)
-async def reset_selected_runs(request: ResetSelectedRunsRequest, db: Session = Depends(get_db)):
+async def reset_selected_runs(request: ResetSelectedRunsRequest, db: Session = Depends(get_db), http_request: Request = None):
+    """Soft-reset the export records of the selected runs. Nothing is deleted and the runs
+    themselves (status, totals, timestamps) are not rewritten."""
     run_ids = list(dict.fromkeys(request.run_ids))
-    logger.warning("Export selected-runs reset requested run_ids=%s", run_ids)
+    logger.warning("Export selected-runs soft reset requested run_ids=%s", run_ids)
 
     if not run_ids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="run_ids is required")
@@ -979,90 +1008,64 @@ async def reset_selected_runs(request: ResetSelectedRunsRequest, db: Session = D
     if not matching_runs:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No matching runs found")
 
-    before_exported_orders = db.query(models.ExportedOrder).filter(models.ExportedOrder.sync_run_id.in_(found_run_ids)).count()
-    before_exported_invoices = db.query(models.ExportedInvoice).filter(models.ExportedInvoice.sync_run_id.in_(found_run_ids)).count()
-
+    before = _export_record_counts(db)
     try:
-        deleted_orders = (
-            db.query(models.ExportedOrder)
-            .filter(models.ExportedOrder.sync_run_id.in_(found_run_ids))
-            .delete(synchronize_session=False)
-        )
-        deleted_invoices = (
-            db.query(models.ExportedInvoice)
-            .filter(models.ExportedInvoice.sync_run_id.in_(found_run_ids))
-            .delete(synchronize_session=False)
-        )
-
-        updated_runs = (
-            db.query(models.SyncRun)
-            .filter(models.SyncRun.id.in_(found_run_ids))
-            .update(
-                {
-                    models.SyncRun.status: "pending",
-                    models.SyncRun.total_invoices: 0,
-                    models.SyncRun.errors: None,
-                    models.SyncRun.finished_at: None,
-                },
-                synchronize_session=False,
-            )
-        )
-
-        db.commit()
-
-        after_exported_orders = db.query(models.ExportedOrder).filter(models.ExportedOrder.sync_run_id.in_(found_run_ids)).count()
-        after_exported_invoices = db.query(models.ExportedInvoice).filter(models.ExportedInvoice.sync_run_id.in_(found_run_ids)).count()
-
+        records = db.query(models.ExportedOrder).filter(models.ExportedOrder.sync_run_id.in_(found_run_ids)).all()
+        outcome = soft_reset_export_records(db, records, source=f"history reset of runs {found_run_ids}", audit=_audit_context(db, http_request))
+        after = _export_record_counts(db)
         logger.warning(
-            "Export selected-runs reset completed requested_run_ids=%s found_run_ids=%s deleted_orders=%s deleted_invoices=%s updated_runs=%s",
+            "Export selected-runs soft reset completed requested_run_ids=%s found_run_ids=%s reset=%s already_reset=%s blocked=%s",
             run_ids,
             found_run_ids,
-            deleted_orders,
-            deleted_invoices,
-            updated_runs,
+            len(outcome["reset"]),
+            len(outcome["already_reset"]),
+            outcome["blocked"],
         )
-
-        return ResetSelectedRunsResponse(
-            ok=True,
-            message="Selected runs reset",
-            data={
-                "requested_run_ids": run_ids,
-                "found_run_ids": found_run_ids,
-                "missing_run_ids": missing_run_ids,
-                "deleted_exported_orders": deleted_orders,
-                "deleted_exported_invoices": deleted_invoices,
-                "updated_sync_runs": updated_runs,
-                "before": {
-                    "exported_orders": before_exported_orders,
-                    "exported_invoices": before_exported_invoices,
-                },
-                "after": {
-                    "exported_orders": after_exported_orders,
-                    "exported_invoices": after_exported_invoices,
-                },
-                "sync_run_status_set_to": "pending",
-                "total_invoices_set_to": 0,
-                "errors_cleared": True,
-                "finished_at_cleared": True,
-            },
-        )
+        data = _soft_reset_response_data(outcome, before, after)
+        data.update({"requested_run_ids": run_ids, "found_run_ids": found_run_ids, "missing_run_ids": missing_run_ids})
+        return ResetSelectedRunsResponse(ok=True, message="Selected runs reset; existing records were kept", data=data)
     except Exception as exc:
         db.rollback()
-        logger.exception(
-            "Export selected-runs reset failed requested_run_ids=%s found_run_ids=%s",
-            run_ids,
-            found_run_ids,
-        )
+        logger.exception("Export selected-runs soft reset failed requested_run_ids=%s found_run_ids=%s", run_ids, found_run_ids)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
                 "ok": False,
                 "message": "Selected runs reset failed",
                 "error": str(exc),
-                "data": {
-                    "requested_run_ids": run_ids,
-                    "found_run_ids": found_run_ids,
-                    "missing_run_ids": missing_run_ids,
-                },
+                "data": {"requested_run_ids": run_ids, "found_run_ids": found_run_ids, "missing_run_ids": missing_run_ids},
             },
         )
+
+
+def _make_settings_export_service(db: Session) -> ExportService:
+    settings = {s.key: s.value for s in db.query(models.Setting).all()}
+    unify = UnifyService(
+        base_url=settings.get("UNIFY_BASE_URL", "https://api.unifyordering.com"),
+        client_id=settings.get("UNIFY_CLIENT_ID", ""),
+        client_secret=settings.get("UNIFY_CLIENT_SECRET", ""),
+    )
+    zoho = ZohoService(
+        base_url=settings.get("ZOHO_BASE_URL", "https://www.zohoapis.eu"),
+        client_id=settings.get("ZOHO_CLIENT_ID", ""),
+        client_secret=settings.get("ZOHO_CLIENT_SECRET", ""),
+        refresh_token=settings.get("ZOHO_REFRESH_TOKEN", ""),
+        org_id=settings.get("ZOHO_ORG_ID", ""),
+    )
+    return make_export_service(unify, zoho)
+
+
+@router.post("/export/reconcile-order/{order_id}", response_model=APIResponse)
+async def reconcile_order(order_id: str, db: Session = Depends(get_db), http_request: Request = None):
+    """Check Zoho for an order that is in_progress (abandoned) or needs_verification.
+    Read-only towards Zoho: links an existing invoice, marks the order reset if none exists,
+    or keeps it under review. Never creates an invoice."""
+    logger.warning("Export reconciliation requested order_id=%s", order_id)
+    export_service = _make_settings_export_service(db)
+    export_service.audit = _audit_context(db, http_request)
+    try:
+        result = await export_service.reconcile_order(db, order_id)
+    except ReconcileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    logger.warning("Export reconciliation completed order_id=%s result=%s", order_id, result)
+    return APIResponse(ok=True, message=result["message"], data=result)

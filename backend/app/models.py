@@ -1,5 +1,5 @@
-from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, UniqueConstraint, JSON
+from datetime import datetime, timezone
+from sqlalchemy import BigInteger, Column, Integer, String, DateTime, Text, ForeignKey, Index, UniqueConstraint, JSON, func
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -93,3 +93,38 @@ class ZohoItemMapping(Base):
     tax_id = Column(String(128), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class ExportEvent(Base):
+    """Append-only audit history of export operations (one row per event).
+
+    The application only ever inserts rows; database triggers created by migration
+    0002_export_events reject UPDATE and DELETE. Rows hold no credentials or invoice
+    payloads: only identifiers, statuses and a short sanitised diagnostic.
+    """
+
+    __tablename__ = "export_events"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    tenant_id = Column(String(64), nullable=False)
+    unify_order_id = Column(String(128), nullable=False)
+    export_record_id = Column(Integer, ForeignKey("exported_orders.id", ondelete="RESTRICT"), nullable=True)
+    sync_run_id = Column(Integer, ForeignKey("sync_runs.id", ondelete="RESTRICT"), nullable=True)
+    event_type = Column(String(48), nullable=False)
+    previous_status = Column(String(32), nullable=True)
+    new_status = Column(String(32), nullable=True)
+    zoho_invoice_id = Column(String(128), nullable=True)
+    actor_id = Column(String(128), nullable=True)
+    detail = Column(String(500), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_export_events_tenant_order", "tenant_id", "unify_order_id", "id"),
+        Index("ix_export_events_tenant_created", "tenant_id", "created_at"),
+        Index("ix_export_events_sync_run", "sync_run_id"),
+        Index("ix_export_events_export_record", "export_record_id"),
+    )

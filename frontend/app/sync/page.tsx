@@ -24,6 +24,9 @@ type UnifyOrderPreview = {
   order_date?: string;
   total: number;
   already_exported?: boolean;
+  // Stored export record status from the backend preview (exported, failed, skipped,
+  // needs_verification, in_progress). Display only; eligibility still uses already_exported.
+  export_status?: string | null;
   preview_status?: string;
   preview_reason?: string;
   status?: string;
@@ -51,7 +54,7 @@ type SyncDetail = {
   order_id: string;
   // Backend returns created / skipped / failed / already_exported; "unknown" is set by the
   // frontend when the response has no usable result for a submitted order.
-  status: "created" | "skipped" | "failed" | "already_exported" | "unknown";
+  status: "created" | "skipped" | "failed" | "already_exported" | "needs_verification" | "in_progress" | "unknown";
   message: string;
   zoho_invoice_id?: string;
 };
@@ -121,6 +124,14 @@ const BADGE_TONE_BY_LABEL: Record<string, StatusTone> = {
   "Needs review": "review",
   Error: "failed",
   Blocked: "blocked",
+};
+
+// Badges for orders whose stored export record is not a completed export (display only).
+const PREVIOUS_EXPORT_BADGES: Record<string, { tone: StatusTone; label: string }> = {
+  failed: { tone: "failed", label: "Previously failed" },
+  skipped: { tone: "blocked", label: "Previously skipped" },
+  needs_verification: { tone: "review", label: "Needs verification" },
+  in_progress: { tone: "running", label: "Sync in progress" },
 };
 
 // Formats plain YYYY-MM-DD values for display; anything else is shown as received.
@@ -1190,16 +1201,62 @@ export default function SyncPage() {
     try {
       const res = await fetch(endpoint, { method: "POST" });
       await parseApiResponse(res, "unsync-order", endpoint);
+      // Soft reset: the record is kept; the next sync checks Zoho before creating an invoice.
       setOrders((currentOrders) =>
-        currentOrders.map((order) => (order.order_id === orderId ? { ...order, already_exported: false } : order)),
+        currentOrders.map((order) => (order.order_id === orderId ? { ...order, already_exported: false, export_status: "reset" } : order)),
       );
-      setMessage(`Order ${orderId} unsynced`);
+      setOrderSyncResults((current) => {
+        const next = { ...current };
+        delete next[orderId];
+        return next;
+      });
+      setMessage(`Order ${orderId} reset. The next sync checks Zoho first and links an existing invoice instead of creating a new one.`);
     } catch (error) {
       console.error("[Sync] Unsync request failed", { orderId, endpoint, error });
       setMessage(`Error: ${describeError(error)}`);
     } finally {
       setLoading(false);
     }
+  };
+
+  // Resolve a needs-verification / in-progress order by checking Zoho (never creates an invoice).
+  const reconcileOrder = async (orderId: string) => {
+    const endpoint = `/api/export/reconcile-order/${encodeURIComponent(orderId)}`;
+    setLoading(true);
+    setMessage("");
+    try {
+      const res = await fetch(endpoint, { method: "POST" });
+      const data = await parseApiResponse<{ data?: { result?: string; status?: string; message?: string } }>(res, "reconcile-order", endpoint);
+      const outcome = data?.data;
+      const nextStatus = outcome?.status;
+      if (nextStatus) {
+        setOrders((currentOrders) =>
+          currentOrders.map((order) =>
+            order.order_id === orderId ? { ...order, already_exported: nextStatus !== "reset", export_status: nextStatus } : order,
+          ),
+        );
+        setOrderSyncResults((current) => {
+          const next = { ...current };
+          delete next[orderId];
+          return next;
+        });
+      }
+      const text = outcome?.message || "Zoho check completed";
+      setMessage(outcome?.result === "ambiguous" ? `Error: ${text}` : text);
+    } catch (error) {
+      console.error("[Sync] Reconcile request failed", { orderId, endpoint, error });
+      setMessage(`Error: ${describeError(error)}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const needsZohoCheck = (order: UnifiedOrder) => {
+    const sessionStatus = orderSyncResults[order.order_id]?.status;
+    if (sessionStatus === "needs_verification" || sessionStatus === "in_progress") {
+      return true;
+    }
+    return Boolean(order.already_exported) && (order.export_status === "needs_verification" || order.export_status === "in_progress");
   };
 
   const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
@@ -1224,9 +1281,10 @@ export default function SyncPage() {
     { label: "Order value", hint: "excl. VAT", value: formatCurrencyEur(totalRevenue), wide: true },
     { label: "Orders", value: previewOrderCount },
     { label: "Customers", value: Object.keys(customers).length },
-    { label: "Ready to sync", value: readyPreviewCount },
+    { label: "Ready to sync", value: readyOrderIds.length },
     { label: "Blocked", value: blockedInRangePreviewCount },
-    { label: "Synced", value: exportedCount },
+    // Only real exports: a stored failed/skipped/unverified record is not a sync.
+    { label: "Synced", value: orders.filter((order) => order.already_exported && (!order.export_status || order.export_status === "exported")).length },
     { label: "Invoices created", value: exportResult?.created ?? 0 },
   ];
   const showGeneralMessage = Boolean(message) && message !== csvUploadMessage;
@@ -1235,8 +1293,15 @@ export default function SyncPage() {
     if (syncResult?.status === "failed") {
       return { tone: "failed", label: "Sync failed" };
     }
+    if (syncResult?.status === "needs_verification" || syncResult?.status === "in_progress") {
+      return { tone: "review", label: "Needs verification" };
+    }
     if (syncResult && !EXPORTED_RESULT_STATUSES.has(syncResult.status)) {
       return { tone: "review", label: "Result unknown" };
+    }
+    // Existing record that is not a completed export: say what it is instead of "Synced".
+    if (order.already_exported && !getResultByOrderId(order.order_id) && order.export_status && order.export_status !== "exported") {
+      return PREVIOUS_EXPORT_BADGES[order.export_status] ?? { tone: "review", label: "Check status" };
     }
     const label = getPreviewBadgeLabel(order);
     return { tone: BADGE_TONE_BY_LABEL[label] ?? "neutral", label };
@@ -1402,7 +1467,7 @@ export default function SyncPage() {
                 <AlertIcon />
               </span>
               <div>
-                <div className="font-medium">Upload failed</div>
+                <div className="font-medium">{orders.length > 0 ? "Sync error" : "Upload failed"}</div>
                 <div className="mt-0.5 leading-6">{csvUploadMessage}</div>
               </div>
             </div>
@@ -1572,15 +1637,28 @@ export default function SyncPage() {
                               >
                                 Sync this order
                               </button>
-                              {order.already_exported && (
+                              {needsZohoCheck(order) ? (
                                 <button
                                   type="button"
-                                  className={BUTTON_DANGER}
-                                  onClick={() => unsyncOrder(order.order_id)}
+                                  className={BUTTON_SECONDARY}
+                                  onClick={() => reconcileOrder(order.order_id)}
                                   disabled={loading}
+                                  title="Check Zoho for an existing invoice for this order"
                                 >
-                                  Unsync
+                                  Check Zoho
                                 </button>
+                              ) : (
+                                order.already_exported && (
+                                  <button
+                                    type="button"
+                                    className={BUTTON_DANGER}
+                                    onClick={() => unsyncOrder(order.order_id)}
+                                    disabled={loading}
+                                    title="Allow this order to be synced again. Existing Zoho invoices are kept and checked first."
+                                  >
+                                    Reset sync
+                                  </button>
+                                )
                               )}
                               <button
                                 type="button"

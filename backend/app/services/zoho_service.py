@@ -24,6 +24,20 @@ class ZohoServiceError(Exception):
     pass
 
 
+class ZohoAmbiguousResponseError(ZohoServiceError):
+    """Zoho may or may not have created the resource (timeout, connection error, 5xx,
+    or a success response without an identifier). Never retry automatically."""
+
+
+class ZohoLookupError(ZohoServiceError):
+    """An invoice lookup failed or its result cannot be trusted to be complete."""
+
+
+# HTTP statuses where the request may still have been processed by Zoho.
+_AMBIGUOUS_HTTP_STATUSES = {408, 500, 502, 503, 504}
+INVOICE_LOOKUP_PAGE_SIZE = 200
+
+
 @dataclass
 class _TokenCacheEntry:
     access_token: str
@@ -379,6 +393,14 @@ class ZohoService:
             }
         )
 
+        # Obtain the access token first: a failure here means the invoice request was never sent.
+        try:
+            await self.get_access_token()
+        except ZohoServiceError:
+            raise
+        except Exception as exc:
+            raise ZohoServiceError(json.dumps({"error": "Zoho token refresh failed", "details": str(exc)})) from exc
+
         try:
             resp = await self._request("POST", "/invoices", json=request_payload)
         except Exception as exc:
@@ -389,20 +411,22 @@ class ZohoService:
                     "response_text": None,
                 }
             )
-            raise ZohoServiceError(json.dumps({"error": "Zoho API failed", "details": str(exc)})) from exc
+            # Timeouts and connection errors do not prove that Zoho rejected the invoice.
+            raise ZohoAmbiguousResponseError(json.dumps({"error": "Zoho API outcome unknown", "details": str(exc)})) from exc
 
         if resp.status_code not in (200, 201):
             logger.error({"zoho_payload": request_payload, "status_code": resp.status_code, "response_text": resp.text})
-            raise ZohoServiceError(
-                json.dumps({"error": "Zoho API failed", "details": resp.text})
+            error_class = ZohoAmbiguousResponseError if resp.status_code in _AMBIGUOUS_HTTP_STATUSES else ZohoServiceError
+            raise error_class(
+                json.dumps({"error": "Zoho API failed", "status_code": resp.status_code, "details": resp.text})
             )
 
         try:
             data = resp.json()
         except ValueError as exc:
             logger.error({"zoho_payload": request_payload, "status_code": resp.status_code, "response_text": resp.text})
-            raise ZohoServiceError(
-                json.dumps({"error": "Zoho API failed", "details": resp.text})
+            raise ZohoAmbiguousResponseError(
+                json.dumps({"error": "Zoho API outcome unknown", "details": resp.text})
             ) from exc
 
         invoice = data.get("invoice") if isinstance(data, dict) else None
@@ -416,14 +440,69 @@ class ZohoService:
             if candidate is not None and str(candidate).strip():
                 return str(candidate).strip()
 
-        raise ZohoServiceError(
+        # A success status without an identifier may still mean the invoice exists.
+        raise ZohoAmbiguousResponseError(
             json.dumps(
                 {
-                    "error": "Zoho API failed",
+                    "error": "Zoho API outcome unknown",
                     "details": f"Zoho create invoice returned no invoice identifier: {data}",
                 }
             )
         )
+
+    async def find_invoices_by_reference_number(self, reference_number: str) -> List[Dict[str, Any]]:
+        """Return Zoho invoices whose reference number matches `reference_number`.
+
+        Raises ZohoLookupError whenever the answer may be incomplete or untrustworthy
+        (HTTP error, unexpected shape, more pages, or a filter that appears unsupported).
+        Callers must not create an invoice when this raises.
+        """
+        reference = (reference_number or "").strip()
+        if not reference:
+            raise ZohoLookupError("Cannot look up invoices without a reference number")
+
+        # Documented list-invoices filters (Zoho Invoice API v3): reference_number, and
+        # filter_by=Status.All so drafts (which Zconnect creates) are never excluded by a
+        # default status filter. Requires the ZohoInvoice.invoices.READ scope.
+        try:
+            resp = await self._request(
+                "GET",
+                "/invoices",
+                params={"reference_number": reference, "filter_by": "Status.All", "per_page": INVOICE_LOOKUP_PAGE_SIZE},
+            )
+        except Exception as exc:
+            raise ZohoLookupError(f"Zoho invoice lookup request failed: {exc}") from exc
+
+        if resp.status_code != 200:
+            raise ZohoLookupError(f"Zoho invoice lookup failed {resp.status_code}: {resp.text}")
+
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ZohoLookupError("Zoho invoice lookup returned invalid JSON") from exc
+
+        invoices = data.get("invoices") if isinstance(data, dict) else None
+        if not isinstance(invoices, list):
+            raise ZohoLookupError("Zoho invoice lookup response has no invoices list")
+
+        # Zoho documents page_context.has_more_page on list responses; without it we cannot
+        # prove the result is complete, so fail closed.
+        page_context = data.get("page_context") if isinstance(data, dict) else None
+        if not isinstance(page_context, dict) or "has_more_page" not in page_context:
+            raise ZohoLookupError("Zoho invoice lookup response has no page_context; completeness unknown")
+        if page_context.get("has_more_page"):
+            raise ZohoLookupError("Zoho invoice lookup returned more than one page; result is incomplete")
+
+        lowered = reference.lower()
+        for invoice in invoices:
+            if not isinstance(invoice, dict):
+                raise ZohoLookupError("Zoho invoice lookup returned an unexpected invoice entry")
+            candidate = str(invoice.get("reference_number") or "").strip().lower()
+            if lowered not in candidate:
+                # Results that do not even contain the reference mean the filter was ignored.
+                raise ZohoLookupError("Zoho invoice lookup filter appears unsupported")
+
+        return invoices
 
     async def create_draft_invoice(self, contact_id: str, lines: List[Dict[str, Any]], reference_number: str) -> str:
         payload = {

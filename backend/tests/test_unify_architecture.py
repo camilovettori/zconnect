@@ -407,6 +407,10 @@ def test_csv_export_route_reuses_export_pipeline(client, monkeypatch, test_db):
         async def create_item(self, name, rate, tax_id):
             return "ITEM-CSV-1"
 
+        async def find_invoices_by_reference_number(self, reference_number):
+            # Zoho duplicate check (required before every invoice): no existing invoice.
+            return []
+
         async def create_draft_invoice_from_payload(self, payload):
             self.last_payload = payload
             return "INV-CSV-1"
@@ -418,6 +422,7 @@ def test_csv_export_route_reuses_export_pipeline(client, monkeypatch, test_db):
     monkeypatch.setattr(ZohoService, "find_item_by_name", CsvZohoService.find_item_by_name)
     monkeypatch.setattr(ZohoService, "create_item", CsvZohoService.create_item)
     monkeypatch.setattr(ZohoService, "create_draft_invoice_from_payload", CsvZohoService.create_draft_invoice_from_payload)
+    monkeypatch.setattr(ZohoService, "find_invoices_by_reference_number", CsvZohoService.find_invoices_by_reference_number)
 
     response = client.post(
         "/api/export/run-csv",

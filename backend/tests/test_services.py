@@ -377,6 +377,10 @@ async def test_export_service_run_export_success(monkeypatch):
         async def create_item(self, sku, name, price):
             return "ZI-1"
 
+        async def find_invoices_by_reference_number(self, reference_number):
+            # Zoho duplicate check (required before every invoice): no existing invoice.
+            return []
+
         async def create_draft_invoice_from_payload(self, payload):
             self.created_invoices += 1
             self.last_payload = payload
@@ -442,6 +446,10 @@ async def test_export_service_uses_item_id_when_zoho_item_is_found(monkeypatch):
         async def get_contact_person_ids(self, contact_id):
             return []
 
+        async def find_invoices_by_reference_number(self, reference_number):
+            # Zoho duplicate check (required before every invoice): no existing invoice.
+            return []
+
         async def create_draft_invoice_from_payload(self, payload):
             self.last_payload = payload
             return "invoice-1"
@@ -480,8 +488,11 @@ def test_normalize_request_date_accepts_iso_and_dd_mm_yyyy():
 
 
 def test_database_url_is_normalized_to_backend_dir():
-    from app.config import settings
+    # Build settings explicitly so the check does not depend on the environment or .env
+    # (tests force DATABASE_URL to a temporary SQLite file in conftest.py).
+    from app.config import Settings
 
+    settings = Settings(DATABASE_URL="sqlite:///./unify_zoho.db", _env_file=None)
     assert settings.normalized_database_url.endswith("/backend/unify_zoho.db")
 
 
@@ -549,6 +560,10 @@ def test_export_service_resolves_customer_name_for_zoho_contact_and_invoice():
         async def get_tax_by_rate(self, rate):
             return "tax-1"
 
+        async def find_invoices_by_reference_number(self, reference_number):
+            # Zoho duplicate check (required before every invoice): no existing invoice.
+            return []
+
         async def create_draft_invoice_from_payload(self, payload):
             self.payload = payload
             return "invoice-1"
@@ -614,6 +629,10 @@ async def test_export_service_repairs_numeric_legacy_contact_before_invoice(monk
 
         async def get_tax_by_rate(self, rate):
             return "tax-1"
+
+        async def find_invoices_by_reference_number(self, reference_number):
+            # Zoho duplicate check (required before every invoice): no existing invoice.
+            return []
 
         async def create_draft_invoice_from_payload(self, payload):
             self.payload = payload

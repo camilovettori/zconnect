@@ -1,12 +1,16 @@
+import json
 import logging
 import re
-from datetime import datetime
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .unify_service import UnifyService
-from .zoho_service import ZohoService, ZohoServiceError
+from .zoho_service import ZohoAmbiguousResponseError, ZohoService, ZohoServiceError
 from .. import models
 from ..schemas import UnifyOrder
 
@@ -16,6 +20,221 @@ class ExportServiceError(Exception):
 
 
 logger = logging.getLogger(__name__)
+
+# exported_orders.status values. One row per Unify order (uq_unify_order_id); the row is
+# updated in place, never duplicated and never deleted by Zconnect.
+EXPORT_STATUS_IN_PROGRESS = "in_progress"  # claimed; a Zoho call may be underway
+EXPORT_STATUS_EXPORTED = "exported"  # a Zoho invoice exists for this order
+EXPORT_STATUS_FAILED = "failed"  # definitely no invoice from the last attempt
+EXPORT_STATUS_SKIPPED = "skipped"  # not processed (preview status was not ready)
+EXPORT_STATUS_RESET = "reset"  # soft reset by a user; may be synced again after a Zoho check
+EXPORT_STATUS_NEEDS_VERIFICATION = "needs_verification"  # Zoho outcome unknown; never auto-retried
+# May be claimed again by a sync (which always checks Zoho before creating).
+RETRYABLE_EXPORT_STATUSES = (EXPORT_STATUS_FAILED, EXPORT_STATUS_SKIPPED, EXPORT_STATUS_RESET)
+# Safety states: never claimed by a sync, never reset; only Zoho reconciliation resolves them.
+SAFETY_EXPORT_STATUSES = (EXPORT_STATUS_IN_PROGRESS, EXPORT_STATUS_NEEDS_VERIFICATION)
+# An in_progress claim older than this is treated as abandoned and may be reconciled.
+STALE_IN_PROGRESS_AFTER = timedelta(minutes=30)
+# Give Zoho time to list a just-created invoice before reconciling needs_verification.
+MIN_VERIFICATION_AGE = timedelta(minutes=5)
+_AUDIT_MESSAGE_LIMIT = 4000
+_AUDIT_TIME_RE = re.compile(r"\[run \d+, (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\]")
+
+
+def audit_text(message: str, sync_run_id: Optional[int], prior_status: Optional[str] = None, prior_message: Optional[str] = None) -> str:
+    """Record message with run, UTC time and the previous status/message (audit trail)."""
+    text = f"{message} [run {sync_run_id}, {datetime.utcnow().isoformat(timespec='seconds')}Z]"
+    if prior_status:
+        text += f" | previous status {prior_status}: {(prior_message or '').strip()}"
+    return text[:_AUDIT_MESSAGE_LIMIT]
+
+
+def latest_audit_time(message: Optional[str]) -> Optional[datetime]:
+    """UTC time of the most recent audit entry in a record message, if present."""
+    match = _AUDIT_TIME_RE.search(message or "")
+    if not match:
+        return None
+    try:
+        return datetime.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+@dataclass
+class AuditContext:
+    """Who/where an export event belongs to. tenant_id isolates event history per company
+    (this deployment is single-tenant; see report). actor_id is the signed-in user when known."""
+
+    tenant_id: str = "default"
+    actor_id: Optional[str] = None
+
+
+_SECRET_RE = re.compile(
+    # token after an auth scheme; key=value style secrets; any long token-like string
+    r"((?:zoho-oauthtoken|bearer|basic)\s+)\S+"
+    r"|((?:access_token|refresh_token|client_secret|client_id|password|api_key|apikey)\W{0,3})[^\s,\"'}&]+"
+    r"|\b[A-Za-z0-9._\-]{32,}\b",
+    re.IGNORECASE,
+)
+
+
+def safe_detail(text: Any, limit: int = 300) -> Optional[str]:
+    """Short diagnostic for the audit log: credentials redacted, whitespace collapsed, capped."""
+    if text is None:
+        return None
+    cleaned = _SECRET_RE.sub(lambda m: (m.group(1) or m.group(2) or "") + "[redacted]", str(text))
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:limit] or None
+
+
+def zoho_diagnostic(reason: Any) -> Optional[str]:
+    """Summarise a Zoho error without its response body (which may contain invoice data)."""
+    text = str(reason or "")
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        parts = [str(data.get("error") or "Zoho error")]
+        if data.get("status_code"):
+            parts.append(f"HTTP {data.get('status_code')}")
+        return safe_detail(" ".join(parts))
+    return safe_detail(text, limit=160)
+
+
+def add_export_event(
+    db: Session,
+    audit: "AuditContext",
+    *,
+    unify_order_id: str,
+    event_type: str,
+    previous_status: Optional[str] = None,
+    new_status: Optional[str] = None,
+    sync_run_id: Optional[int] = None,
+    export_record_id: Optional[int] = None,
+    zoho_invoice_id: Optional[str] = None,
+    detail: Any = None,
+) -> None:
+    """Stage one append-only audit event; the caller commits it with the state change."""
+    db.add(
+        models.ExportEvent(
+            tenant_id=(audit.tenant_id or "default")[:64],
+            unify_order_id=unify_order_id,
+            export_record_id=export_record_id,
+            sync_run_id=sync_run_id,
+            event_type=event_type,
+            previous_status=previous_status,
+            new_status=new_status,
+            zoho_invoice_id=zoho_invoice_id,
+            actor_id=(audit.actor_id or None) and audit.actor_id[:128],
+            detail=safe_detail(detail),
+        )
+    )
+
+
+def list_export_events(db: Session, tenant_id: str, unify_order_id: Optional[str] = None) -> List[models.ExportEvent]:
+    """Events for one tenant (optionally one order), oldest first. Always tenant-scoped."""
+    query = select(models.ExportEvent).where(models.ExportEvent.tenant_id == tenant_id)
+    if unify_order_id is not None:
+        query = query.where(models.ExportEvent.unify_order_id == unify_order_id)
+    return list(db.execute(query.order_by(models.ExportEvent.id)).scalars().all())
+
+
+class ReconcileError(Exception):
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+
+
+class _ClaimOwnershipLost(Exception):
+    pass
+
+
+def soft_reset_export_records(
+    db: Session,
+    records: List[models.ExportedOrder],
+    source: str,
+    audit: Optional["AuditContext"] = None,
+) -> Dict[str, List[str]]:
+    """Mark export records as reset without deleting anything.
+
+    Invoice ids, exported_invoices rows, sync_run totals and the record history are kept.
+    in_progress / needs_verification records are never reset (they need Zoho reconciliation).
+    Each update is conditional on the status read, so a concurrent change is never overwritten.
+    """
+    audit = audit or AuditContext()
+    outcome: Dict[str, List[str]] = {"reset": [], "already_reset": [], "blocked": []}
+    for record in records:
+        current_status = record.status
+        if current_status in SAFETY_EXPORT_STATUSES:
+            outcome["blocked"].append(record.unify_order_id)
+            add_export_event(
+                db,
+                audit,
+                unify_order_id=record.unify_order_id,
+                event_type="reset_refused",
+                previous_status=current_status,
+                new_status=current_status,
+                sync_run_id=record.sync_run_id,
+                export_record_id=record.id,
+                detail=f"Reset refused ({source}): order needs a Zoho check first",
+            )
+            continue
+        if current_status == EXPORT_STATUS_RESET:
+            outcome["already_reset"].append(record.unify_order_id)
+            continue
+        result = db.execute(
+            update(models.ExportedOrder)
+            .where(models.ExportedOrder.id == record.id, models.ExportedOrder.status == current_status)
+            .values(
+                status=EXPORT_STATUS_RESET,
+                message=audit_text(f"Reset by user ({source}); the next sync will check Zoho before creating an invoice", record.sync_run_id, current_status, record.message),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            outcome["reset"].append(record.unify_order_id)
+            add_export_event(
+                db,
+                audit,
+                unify_order_id=record.unify_order_id,
+                event_type="reset",
+                previous_status=current_status,
+                new_status=EXPORT_STATUS_RESET,
+                sync_run_id=record.sync_run_id,
+                export_record_id=record.id,
+                detail=f"Soft reset ({source})",
+            )
+        else:
+            outcome["blocked"].append(record.unify_order_id)
+    db.commit()
+    db.expire_all()
+    return outcome
+
+
+@dataclass
+class _ClaimResult:
+    claimed: bool
+    prior_status: Optional[str] = None
+    prior_message: Optional[str] = None
+    current_status: Optional[str] = None
+    token: Optional[str] = None
+    record_id: Optional[int] = None
+
+
+@dataclass
+class _OrderAttemptState:
+    order_id: str = ""
+    customer_name: str = ""
+    claimed: bool = False
+    claim_token: Optional[str] = None
+    export_record_id: Optional[int] = None
+    prior_status: Optional[str] = None
+    prior_message: Optional[str] = None
+    zoho_create_started: bool = False
+    zoho_invoice_id: Optional[str] = None
+
 
 ZOHO_STANDARD_TAX_ID = "229622000000038161"
 ZOHO_REDUCED_TAX_ID = "229622000000038157"
@@ -97,6 +316,8 @@ class ExportService:
     def __init__(self, unify_service: UnifyService, zoho_service: ZohoService):
         self.unify_service = unify_service
         self.zoho_service = zoho_service
+        # Set by the caller (route) per request; defaults keep tests and scripts working.
+        self.audit = AuditContext()
 
     def _clean_text(self, value: Any) -> Optional[str]:
         if value is None:
@@ -932,6 +1153,651 @@ class ExportService:
         )
         return payload
 
+    # ------------------------------------------------------------------
+    # Idempotent per-order export state (exported_orders)
+    # ------------------------------------------------------------------
+
+    def _get_export_record(self, db: Session, unify_order_id: str) -> Optional[models.ExportedOrder]:
+        return db.execute(
+            select(models.ExportedOrder).where(models.ExportedOrder.unify_order_id == unify_order_id)
+        ).scalar_one_or_none()
+
+    def _audit_message(self, message: str, sync_run_id: int, prior_status: Optional[str] = None, prior_message: Optional[str] = None) -> str:
+        return audit_text(message, sync_run_id, prior_status, prior_message)
+
+    def _claim_order(self, db: Session, sync_run_id: int, order_id: str, customer_name: str) -> _ClaimResult:
+        """Atomically mark the order as in_progress before any Zoho call.
+
+        New orders are claimed by INSERT (uq_unify_order_id rejects a concurrent claimer).
+        Existing failed / skipped / reset rows are claimed by a conditional UPDATE that only
+        succeeds while the row still has that status. Every other status is not claimable.
+        The row keeps its original sync_run_id (history); ownership is tracked by a claim
+        token written into the message, so later writes only apply while we still own it.
+        """
+        token = uuid.uuid4().hex[:16]
+        claim_text = f"Export attempt started (claim {token})"
+        existing = self._get_export_record(db, order_id)
+        if existing is None:
+            record = models.ExportedOrder(
+                sync_run_id=sync_run_id,
+                unify_order_id=order_id,
+                customer_name=customer_name,
+                status=EXPORT_STATUS_IN_PROGRESS,
+                message=audit_text(claim_text, sync_run_id),
+            )
+            db.add(record)
+            try:
+                db.flush()
+                add_export_event(
+                    db,
+                    self.audit,
+                    unify_order_id=order_id,
+                    event_type="claimed",
+                    previous_status=None,
+                    new_status=EXPORT_STATUS_IN_PROGRESS,
+                    sync_run_id=sync_run_id,
+                    export_record_id=record.id,
+                    detail="New order claimed for export",
+                )
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                current = self._get_export_record(db, order_id)
+                logger.warning("Order %s was claimed concurrently by another request", order_id)
+                return _ClaimResult(False, current_status=current.status if current else None, record_id=current.id if current else None)
+            return _ClaimResult(True, token=token, record_id=record.id)
+
+        prior_status = existing.status
+        prior_message = existing.message
+        record_id = existing.id
+        if prior_status not in RETRYABLE_EXPORT_STATUSES:
+            return _ClaimResult(False, current_status=prior_status, record_id=record_id)
+
+        result = db.execute(
+            update(models.ExportedOrder)
+            .where(
+                models.ExportedOrder.unify_order_id == order_id,
+                models.ExportedOrder.status == prior_status,
+            )
+            .values(
+                status=EXPORT_STATUS_IN_PROGRESS,
+                message=audit_text(claim_text, sync_run_id, prior_status, prior_message),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            db.expire_all()
+            current = self._get_export_record(db, order_id)
+            logger.warning("Order %s retry claim lost to a concurrent request", order_id)
+            return _ClaimResult(False, current_status=current.status if current else None, record_id=record_id)
+        add_export_event(
+            db,
+            self.audit,
+            unify_order_id=order_id,
+            event_type="claimed",
+            previous_status=prior_status,
+            new_status=EXPORT_STATUS_IN_PROGRESS,
+            sync_run_id=sync_run_id,
+            export_record_id=record_id,
+            detail=f"Order claimed for export after status {prior_status}",
+        )
+        db.commit()
+        db.expire_all()
+        return _ClaimResult(True, prior_status=prior_status, prior_message=prior_message, token=token, record_id=record_id)
+
+    def _owned_row(self, state: _OrderAttemptState):
+        """WHERE clause matching the record only while this attempt still owns its claim."""
+        return (
+            models.ExportedOrder.unify_order_id == state.order_id,
+            models.ExportedOrder.status == EXPORT_STATUS_IN_PROGRESS,
+            models.ExportedOrder.message.like(f"%(claim {state.claim_token})%"),
+        )
+
+    def _finalize_claim(self, db: Session, sync_run_id: int, state: _OrderAttemptState, status: str, message: str) -> Dict[str, Any]:
+        """Best-effort update of the claimed row. If the write fails the row stays in_progress,
+        which blocks further attempts until it is reconciled against Zoho (safe)."""
+        detail: Dict[str, Any] = {"order_id": state.order_id, "status": status, "message": message}
+        try:
+            result = db.execute(
+                update(models.ExportedOrder)
+                .where(*self._owned_row(state))
+                .values(status=status, message=self._audit_message(message, sync_run_id, state.prior_status, state.prior_message))
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount != 1:
+                db.rollback()
+                logger.critical(
+                    "Export record changed while order %s was being processed; outcome %s not recorded: %s",
+                    state.order_id,
+                    status,
+                    message,
+                )
+                detail["message"] = f"{message} (the export record was changed concurrently; check History)"
+                self._record_stale_attempt(db, sync_run_id, state, status, message)
+                return detail
+            add_export_event(
+                db,
+                self.audit,
+                unify_order_id=state.order_id,
+                event_type=status,
+                previous_status=EXPORT_STATUS_IN_PROGRESS,
+                new_status=status,
+                sync_run_id=sync_run_id,
+                export_record_id=state.export_record_id,
+                zoho_invoice_id=state.zoho_invoice_id,
+                detail=zoho_diagnostic(message),
+            )
+            db.commit()
+            db.expire_all()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Could not record export status order_id=%s status=%s message=%s zoho_invoice_id=%s; record left in_progress",
+                state.order_id,
+                status,
+                message,
+                state.zoho_invoice_id,
+            )
+        return detail
+
+    def _persist_exported(self, db: Session, sync_run_id: int, state: _OrderAttemptState, invoice_id: str, buyer_key: str, message: str) -> None:
+        result = db.execute(
+            update(models.ExportedOrder)
+            .where(*self._owned_row(state))
+            .values(status=EXPORT_STATUS_EXPORTED, message=self._audit_message(message, sync_run_id, state.prior_status, state.prior_message))
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            raise _ClaimOwnershipLost(f"export record for {state.order_id} is no longer owned by this attempt")
+        self._record_invoice_event(
+            db,
+            sync_run_id=sync_run_id,
+            customer_name=buyer_key,
+            order_id=state.order_id,
+            invoice_id=invoice_id,
+            message="Draft invoice created" if message.startswith("Invoice ") else message,
+        )
+        linked = not message.startswith("Invoice ")
+        add_export_event(
+            db,
+            self.audit,
+            unify_order_id=state.order_id,
+            event_type="invoice_linked" if linked else "invoice_created",
+            previous_status=EXPORT_STATUS_IN_PROGRESS,
+            new_status=EXPORT_STATUS_EXPORTED,
+            sync_run_id=sync_run_id,
+            export_record_id=state.export_record_id,
+            zoho_invoice_id=invoice_id,
+            detail="Existing Zoho invoice linked; no new invoice created" if linked else "Draft invoice created in Zoho",
+        )
+        db.commit()
+        db.expire_all()
+
+    def _record_invoice_event(self, db: Session, *, sync_run_id: int, customer_name: str, order_id: str, invoice_id: str, message: str) -> None:
+        """Add the exported_invoices row for this order's Zoho invoice once. Re-linking the
+        same invoice to the same order (after a reset or reconciliation) must not create a
+        second row, so sales reporting never counts that invoice twice."""
+        existing_rows = db.execute(
+            select(models.ExportedInvoice.unify_order_ids).where(models.ExportedInvoice.zoho_invoice_id == invoice_id)
+        ).scalars().all()
+        if any(order_id in (order_ids or []) for order_ids in existing_rows):
+            return
+        db.add(
+            models.ExportedInvoice(
+                sync_run_id=sync_run_id,
+                unify_customer_name=customer_name,
+                unify_order_ids=[order_id],
+                zoho_invoice_id=invoice_id,
+                status="success",
+                message=message,
+            )
+        )
+
+    def _record_skip_if_absent(self, db: Session, sync_run_id: int, order_id: str, customer_name: str, reason: str) -> None:
+        if self._get_export_record(db, order_id) is not None:
+            return
+        record = models.ExportedOrder(
+            sync_run_id=sync_run_id,
+            unify_order_id=order_id,
+            customer_name=customer_name,
+            status=EXPORT_STATUS_SKIPPED,
+            message=reason,
+        )
+        db.add(record)
+        try:
+            db.flush()
+            add_export_event(
+                db,
+                self.audit,
+                unify_order_id=order_id,
+                event_type="skipped",
+                previous_status=None,
+                new_status=EXPORT_STATUS_SKIPPED,
+                sync_run_id=sync_run_id,
+                export_record_id=record.id,
+                detail=f"Not processed: preview status {reason}",
+            )
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+
+    def _record_stale_attempt(self, db: Session, sync_run_id: int, state: _OrderAttemptState, intended_status: str, message: str) -> None:
+        """Evidence that an attempt finished after losing its claim (its outcome was not applied)."""
+        try:
+            add_export_event(
+                db,
+                self.audit,
+                unify_order_id=state.order_id,
+                event_type="stale_attempt_rejected",
+                previous_status=EXPORT_STATUS_IN_PROGRESS,
+                new_status=None,
+                sync_run_id=sync_run_id,
+                export_record_id=state.export_record_id,
+                zoho_invoice_id=state.zoho_invoice_id,
+                detail=f"Outcome {intended_status} not applied: record changed by another operation. {zoho_diagnostic(message) or ''}",
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not record stale_attempt_rejected event for order %s", state.order_id)
+
+    def _record_blocked_attempt(self, db: Session, sync_run_id: int, order_id: str, claim: _ClaimResult, detail: Dict[str, Any]) -> None:
+        try:
+            add_export_event(
+                db,
+                self.audit,
+                unify_order_id=order_id,
+                event_type="sync_blocked",
+                previous_status=claim.current_status,
+                new_status=claim.current_status,
+                sync_run_id=sync_run_id,
+                export_record_id=claim.record_id,
+                detail=detail.get("message"),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not record sync_blocked event for order %s", order_id)
+
+    def _unclaimed_order_result(self, order_id: str, current_status: Optional[str]) -> Tuple[Dict[str, Any], str]:
+        if current_status == EXPORT_STATUS_EXPORTED:
+            logger.info("Skipped duplicate Unify order %s", order_id)
+            return {"order_id": order_id, "status": "already_exported", "message": "Already exported"}, "skipped"
+        if current_status == EXPORT_STATUS_IN_PROGRESS:
+            message = "Another sync is processing this order, or a previous attempt did not finish. Check Zoho before retrying."
+            return {"order_id": order_id, "status": EXPORT_STATUS_IN_PROGRESS, "message": message}, "needs_verification"
+        if current_status == EXPORT_STATUS_NEEDS_VERIFICATION:
+            message = "A previous attempt may have created a Zoho invoice. Check Zoho before retrying."
+            return {"order_id": order_id, "status": EXPORT_STATUS_NEEDS_VERIFICATION, "message": message}, "needs_verification"
+        message = f"Order has export status '{current_status}'. Check Zoho before retrying."
+        return {"order_id": order_id, "status": EXPORT_STATUS_NEEDS_VERIFICATION, "message": message}, "needs_verification"
+
+    async def _verify_existing_zoho_invoice(
+        self,
+        order_id: str,
+        *,
+        contact_id: Optional[str] = None,
+        customer_name: Optional[str] = None,
+    ) -> Tuple[str, Optional[str], str]:
+        """Check Zoho for an invoice that already represents this order.
+
+        Matching: reference number equal to the order id (case-insensitive, trimmed) and not
+        void (Zoho's documented cancelled state), then customer identity: the Zoho customer_id
+        when the contact is known (sync), otherwise the customer name (reconciliation).
+
+        Returns (verdict, invoice_id, detail):
+        - "none": no active invoice with this exact reference -> safe to create
+        - "match": exactly one active invoice with this reference AND this customer -> link it
+        - "ambiguous": anything else -> never create; needs review
+        - "lookup_failed": lookup errored or its result may be incomplete -> never create
+        """
+        try:
+            invoices = await self.zoho_service.find_invoices_by_reference_number(order_id)
+        except ZohoServiceError as exc:
+            return "lookup_failed", None, str(exc)
+
+        wanted = order_id.strip().casefold()
+        exact = [inv for inv in invoices if str(inv.get("reference_number") or "").strip().casefold() == wanted]
+        active = [inv for inv in exact if str(inv.get("status") or "").strip().lower() != "void"]
+        if not active:
+            return "none", None, f"No active Zoho invoice with reference {order_id}"
+        if len(active) == 1:
+            candidate = active[0]
+            invoice_id = str(candidate.get("invoice_id") or "").strip()
+            if contact_id is not None:
+                same_customer = str(candidate.get("customer_id") or "").strip() == str(contact_id).strip()
+            else:
+                wanted_name = self._normalize_customer_name(customer_name)
+                same_customer = bool(wanted_name) and self._normalize_customer_name(candidate.get("customer_name")) == wanted_name
+            if invoice_id and same_customer:
+                return "match", invoice_id, f"Zoho invoice {invoice_id} matches reference {order_id} and the customer"
+        summary = ", ".join(
+            f"{inv.get('invoice_number') or inv.get('invoice_id')} (customer {inv.get('customer_name') or inv.get('customer_id')}, status {inv.get('status')})"
+            for inv in active
+        )
+        return "ambiguous", None, f"Zoho has {len(active)} active invoice(s) with reference {order_id} that could not be matched safely: {summary}"
+
+    async def _process_order(self, db: Session, sync_run_id: int, order: UnifyOrder, state: _OrderAttemptState) -> Tuple[Dict[str, Any], str]:
+        """Export one order. Returns (detail, outcome) where outcome is one of
+        created / skipped / failed / needs_verification."""
+        order_id = order.order_id
+        buyer_key = self._buyer_key(order)
+        contact_name = self._resolve_customer_display_name(order)
+        status = (getattr(order, "status", "confirmed") or "confirmed").strip().lower()
+        preview_status = (getattr(order, "preview_status", "ready") or "ready").strip().lower()
+        preview_reason = (getattr(order, "preview_reason", "") or "").strip()
+        invoice_date = self._resolve_invoice_date(order)
+        record_customer = contact_name or buyer_key
+        state.order_id = order_id
+        state.customer_name = record_customer
+
+        self._log_customer_resolution(order, contact_name, contact_name)
+        logger.info("Processing Unify order %s for buyer %s", order_id, buyer_key)
+        logger.info(
+            "Attempting export order_id=%s buyer_key=%s preview_status=%s preview_reason=%s invoice_date=%s contact_name=%s",
+            order_id,
+            buyer_key,
+            preview_status,
+            preview_reason,
+            invoice_date,
+            contact_name,
+        )
+        logger.info(
+            "Invoice sync customer context order_id=%s buyer_id=%s resolved_customer_name=%s",
+            order_id,
+            buyer_key,
+            contact_name,
+        )
+
+        if preview_status not in {"ready", "mapping_issue"}:
+            reason = preview_reason or preview_status
+            logger.info("Skipped Unify order %s due to preview status: %s", order_id, reason)
+            self._record_skip_if_absent(db, sync_run_id, order_id, record_customer, reason)
+            return {"order_id": order_id, "status": "skipped", "message": reason}, "skipped"
+        if preview_status == "mapping_issue":
+            logger.info("Order %s has mapping_issue preview status but remains eligible for export", order_id)
+
+        if status and status not in {"confirmed", "received", "checked", "ready", "completed", "delivered"}:
+            logger.info("Order %s has non-ready raw status %s but remains eligible because preview status is ready", order_id, status)
+
+        claim = self._claim_order(db, sync_run_id, order_id, record_customer)
+        if not claim.claimed:
+            blocked_detail, blocked_outcome = self._unclaimed_order_result(order_id, claim.current_status)
+            self._record_blocked_attempt(db, sync_run_id, order_id, claim, blocked_detail)
+            return blocked_detail, blocked_outcome
+        state.claimed = True
+        state.claim_token = claim.token
+        state.export_record_id = claim.record_id
+        state.prior_status = claim.prior_status
+        state.prior_message = claim.prior_message
+
+        try:
+            line_items, line_errors = await self._build_line_items(db, order)
+        except ExportServiceError as exc:
+            reason = str(exc)
+            logger.error("Failed to build line items for order %s: %s", order_id, reason)
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
+
+        validation_errors = self._validate_invoice_payload(
+            order,
+            contact_name=contact_name,
+            invoice_date=invoice_date,
+            line_items=line_items,
+            line_errors=line_errors,
+        )
+        if validation_errors:
+            reason = "; ".join(validation_errors)
+            logger.warning("Order %s failed validation: %s", order_id, reason)
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
+
+        try:
+            contact_id = await self._resolve_contact_for_order(db, order, record_customer)
+        except ZohoServiceError as exc:
+            reason = str(exc)
+            logger.error("Failed to resolve Zoho contact for order %s: %s", order_id, reason)
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
+
+        # Zoho duplicate check before EVERY creation (new orders, retries and resets).
+        verdict, existing_invoice_id, verdict_detail = await self._verify_existing_zoho_invoice(order_id, contact_id=contact_id)
+        logger.info(
+            "Zoho duplicate check order_id=%s prior_status=%s verdict=%s invoice_id=%s detail=%s",
+            order_id,
+            claim.prior_status,
+            verdict,
+            existing_invoice_id,
+            verdict_detail,
+        )
+        if verdict == "match" and existing_invoice_id:
+            link_message = f"Linked existing Zoho invoice {existing_invoice_id}; no new invoice created"
+            try:
+                self._persist_exported(db, sync_run_id, state, existing_invoice_id, buyer_key, message=link_message)
+            except _ClaimOwnershipLost as exc:
+                logger.critical("Could not link Zoho invoice %s to order %s: %s", existing_invoice_id, order_id, exc)
+                state.zoho_invoice_id = existing_invoice_id
+                self._record_stale_attempt(db, sync_run_id, state, EXPORT_STATUS_EXPORTED, "link not applied")
+                return {
+                    "order_id": order_id,
+                    "status": EXPORT_STATUS_NEEDS_VERIFICATION,
+                    "zoho_invoice_id": existing_invoice_id,
+                    "message": f"Existing Zoho invoice {existing_invoice_id} found but the export record changed concurrently; check History",
+                }, "needs_verification"
+            return {
+                "order_id": order_id,
+                "status": "already_exported",
+                "zoho_invoice_id": existing_invoice_id,
+                "message": "An existing Zoho invoice was found for this order and linked; no new invoice was created",
+            }, "skipped"
+        if verdict == "ambiguous":
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_NEEDS_VERIFICATION, verdict_detail), "needs_verification"
+        if verdict != "none":
+            reason = f"Invoice not created: the Zoho duplicate check could not be completed ({verdict_detail})"
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
+
+        payload = await self._build_draft_invoice_payload(
+            order,
+            contact_id,
+            line_items,
+            invoice_date or order.order_date,
+            record_customer,
+        )
+        payload_item_ids = [str(line.get("item_id")) for line in line_items if line.get("item_id")]
+        payload_tax_ids = [str(line.get("tax_id")) for line in line_items if line.get("tax_id")]
+        logger.info("Zoho payload sent order_id=%s payload=%s", order_id, payload)
+        state.zoho_create_started = True
+        try:
+            invoice_id = await self.zoho_service.create_draft_invoice_from_payload(payload)
+        except ZohoAmbiguousResponseError as exc:
+            reason = str(exc)
+            logger.error("Zoho invoice creation outcome unknown for order %s: %s", order_id, reason)
+            message = f"Zoho invoice creation outcome unknown; check Zoho before retrying: {reason}"
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_NEEDS_VERIFICATION, message), "needs_verification"
+        except ZohoServiceError as exc:
+            reason = str(exc)
+            logger.error("Zoho invoice creation failed for order %s: %s", order_id, reason)
+            return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
+
+        state.zoho_invoice_id = invoice_id
+        logger.info("Zoho response received order_id=%s invoice_id=%s", order_id, invoice_id)
+        logger.info("Created draft invoice %s for order %s", invoice_id, order_id)
+        logger.info(
+            "Zoho invoice payload summary order_id=%s invoice_id=%s item_ids_used=%s tax_ids_used=%s",
+            order_id,
+            invoice_id,
+            payload_item_ids,
+            payload_tax_ids,
+        )
+
+        try:
+            self._persist_exported(db, sync_run_id, state, invoice_id, buyer_key, message=f"Invoice {invoice_id} created")
+        except _ClaimOwnershipLost as exc:
+            logger.critical("Zoho invoice %s was created for order %s but the claim was lost: %s", invoice_id, order_id, exc)
+            self._record_stale_attempt(db, sync_run_id, state, EXPORT_STATUS_EXPORTED, f"invoice {invoice_id} created after claim was lost")
+            return {
+                "order_id": order_id,
+                "status": EXPORT_STATUS_NEEDS_VERIFICATION,
+                "zoho_invoice_id": invoice_id,
+                "message": f"Zoho invoice {invoice_id} was created but the export record changed concurrently; check History",
+            }, "needs_verification"
+        except Exception as exc:
+            db.rollback()
+            logger.critical(
+                "Zoho invoice %s was created for order %s but could not be recorded: %s",
+                invoice_id,
+                order_id,
+                exc,
+            )
+            message = f"Zoho invoice {invoice_id} was created but could not be recorded; check Zoho before retrying: {exc}"
+            detail = self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_NEEDS_VERIFICATION, message)
+            detail["zoho_invoice_id"] = invoice_id
+            return detail, "needs_verification"
+
+        return {
+            "order_id": order_id,
+            "status": "created",
+            "zoho_invoice_id": invoice_id,
+            "message": "Draft invoice created",
+        }, "created"
+
+    def _handle_unexpected_order_error(self, db: Session, sync_run_id: int, order: UnifyOrder, state: _OrderAttemptState, exc: BaseException) -> Tuple[Dict[str, Any], str]:
+        db.rollback()
+        order_id = state.order_id or order.order_id
+        logger.exception("Unexpected error while exporting order %s zoho_create_started=%s", order_id, state.zoho_create_started)
+        if not state.claimed:
+            try:
+                add_export_event(
+                    db,
+                    self.audit,
+                    unify_order_id=order_id,
+                    event_type="sync_error",
+                    sync_run_id=sync_run_id,
+                    detail=f"Unexpected error before claim: {exc.__class__.__name__}",
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+            return {"order_id": order_id, "status": EXPORT_STATUS_FAILED, "message": f"Unexpected error before the order was claimed: {exc}"}, "failed"
+        if state.zoho_create_started:
+            message = f"Unexpected error during Zoho invoice creation; check Zoho before retrying: {exc}"
+            detail = self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_NEEDS_VERIFICATION, message)
+            if state.zoho_invoice_id:
+                detail["zoho_invoice_id"] = state.zoho_invoice_id
+            return detail, "needs_verification"
+        return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, f"Unexpected error: {exc}"), "failed"
+
+    # ------------------------------------------------------------------
+    # Crash recovery: explicit Zoho reconciliation of in_progress / needs_verification
+    # ------------------------------------------------------------------
+
+    async def reconcile_order(self, db: Session, order_id: str, now: Optional[datetime] = None) -> Dict[str, Any]:
+        """Resolve an in_progress or needs_verification record by checking Zoho.
+
+        Never assumes failure and never creates an invoice. Requires the record to be old
+        enough (in_progress: abandoned; needs_verification: time for Zoho to list a just-
+        created invoice). The final write is conditional on the record being unchanged, so
+        concurrent reconciliations and syncs cannot both act on it.
+        """
+        now = now or datetime.utcnow()
+        record = self._get_export_record(db, order_id)
+        if record is None:
+            raise ReconcileError(404, "Order not found in export history")
+        observed_status = record.status
+        observed_message = record.message
+        if observed_status not in SAFETY_EXPORT_STATUSES:
+            raise ReconcileError(409, f"Order has export status '{observed_status}'; there is nothing to reconcile")
+
+        last_event = latest_audit_time(observed_message)
+        age = now - last_event if last_event else None
+        if observed_status == EXPORT_STATUS_IN_PROGRESS and age is not None and age < STALE_IN_PROGRESS_AFTER:
+            minutes = int(STALE_IN_PROGRESS_AFTER.total_seconds() // 60)
+            raise ReconcileError(409, f"This order may still be processing. Try again after {minutes} minutes from the start of the attempt.")
+        if observed_status == EXPORT_STATUS_NEEDS_VERIFICATION and age is not None and age < MIN_VERIFICATION_AGE:
+            minutes = int(MIN_VERIFICATION_AGE.total_seconds() // 60)
+            raise ReconcileError(409, f"Zoho may not list a just-created invoice yet. Try again in {minutes} minutes.")
+
+        verdict, invoice_id, verdict_detail = await self._verify_existing_zoho_invoice(order_id, customer_name=record.customer_name)
+        logger.warning(
+            "Reconciliation check order_id=%s previous_status=%s verdict=%s invoice_id=%s detail=%s",
+            order_id,
+            observed_status,
+            verdict,
+            invoice_id,
+            verdict_detail,
+        )
+        if verdict == "lookup_failed":
+            try:
+                add_export_event(
+                    db,
+                    self.audit,
+                    unify_order_id=order_id,
+                    event_type="reconcile_failed",
+                    previous_status=observed_status,
+                    new_status=observed_status,
+                    sync_run_id=record.sync_run_id,
+                    export_record_id=record.id,
+                    detail=f"Zoho check failed; nothing changed: {zoho_diagnostic(verdict_detail)}",
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+            raise ReconcileError(502, f"Zoho could not be checked; nothing was changed ({verdict_detail})")
+
+        if verdict == "match" and invoice_id:
+            new_status, result_label = EXPORT_STATUS_EXPORTED, "linked"
+            message = f"Reconciled: linked existing Zoho invoice {invoice_id}"
+        elif verdict == "none":
+            new_status, result_label = EXPORT_STATUS_RESET, "reset"
+            message = "Reconciled: no Zoho invoice found; the next sync will check Zoho again before creating one"
+        else:
+            new_status, result_label = EXPORT_STATUS_NEEDS_VERIFICATION, "ambiguous"
+            message = f"Reconciled: review required in Zoho. {verdict_detail}"
+
+        result = db.execute(
+            update(models.ExportedOrder)
+            .where(
+                models.ExportedOrder.id == record.id,
+                models.ExportedOrder.status == observed_status,
+                models.ExportedOrder.message == observed_message,
+            )
+            .values(status=new_status, message=audit_text(message, record.sync_run_id, observed_status, observed_message))
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            db.rollback()
+            raise ReconcileError(409, "The order changed while it was being reconciled; refresh and try again")
+        add_export_event(
+            db,
+            self.audit,
+            unify_order_id=order_id,
+            event_type="reconciled",
+            previous_status=observed_status,
+            new_status=new_status,
+            sync_run_id=record.sync_run_id,
+            export_record_id=record.id,
+            zoho_invoice_id=invoice_id,
+            detail=f"Reconciliation result: {result_label}",
+        )
+        if new_status == EXPORT_STATUS_EXPORTED:
+            self._record_invoice_event(
+                db,
+                sync_run_id=record.sync_run_id,
+                customer_name=record.customer_name or order_id,
+                order_id=order_id,
+                invoice_id=invoice_id,
+                message="Linked during reconciliation",
+            )
+        db.commit()
+        db.expire_all()
+        return {
+            "order_id": order_id,
+            "previous_status": observed_status,
+            "status": new_status,
+            "result": result_label,
+            "zoho_invoice_id": invoice_id,
+            "message": message,
+        }
+
     async def run_export(
         self,
         db: Session,
@@ -952,7 +1818,8 @@ class ExportService:
         db.refresh(sync_run)
 
         error_messages: List[str] = []
-        structured = {"created": 0, "skipped": 0, "failed": 0, "details": []}
+        structured = {"created": 0, "skipped": 0, "failed": 0, "needs_verification": 0, "details": []}
+        total_invoices = 0
         attempted_orders = 0
         successful_orders = 0
         failed_orders = 0
@@ -982,211 +1849,35 @@ class ExportService:
             sync_run.total_invoices = 0
             db.commit()
 
+            # Read once: touching sync_run after a failed flush (before rollback) would raise.
+            sync_run_id = sync_run.id
             for order in orders:
                 attempted_orders += 1
-                order_id = order.order_id
-                buyer_key = self._buyer_key(order)
-                contact_name = self._resolve_customer_display_name(order)
-                status = (getattr(order, "status", "confirmed") or "confirmed").strip().lower()
-                preview_status = (getattr(order, "preview_status", "ready") or "ready").strip().lower()
-                preview_reason = (getattr(order, "preview_reason", "") or "").strip()
-                invoice_date = self._resolve_invoice_date(order)
-                stage = f"processing_order:{order_id}"
+                stage = f"processing_order:{order.order_id}"
+                attempt_state = _OrderAttemptState(order_id=order.order_id)
+                try:
+                    detail, outcome = await self._process_order(db, sync_run_id, order, attempt_state)
+                except Exception as exc:  # isolate failures per order; never abort the batch
+                    detail, outcome = self._handle_unexpected_order_error(db, sync_run_id, order, attempt_state, exc)
 
-                self._log_customer_resolution(order, contact_name, contact_name)
-                logger.info("Processing Unify order %s for buyer %s", order_id, buyer_key)
-                logger.info(
-                    "Attempting export order_id=%s buyer_key=%s preview_status=%s preview_reason=%s invoice_date=%s contact_name=%s",
-                    order_id,
-                    buyer_key,
-                    preview_status,
-                    preview_reason,
-                    invoice_date,
-                    contact_name,
-                )
-                logger.info(
-                    "Invoice sync customer context order_id=%s buyer_id=%s resolved_customer_name=%s",
-                    order_id,
-                    buyer_key,
-                    contact_name,
-                )
-
-                if preview_status not in {"ready", "mapping_issue"}:
-                    reason = preview_reason or preview_status
-                    logger.info("Skipped Unify order %s due to preview status: %s", order_id, reason)
-                    skipped_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="skipped",
-                        message=reason,
-                    )
-                    db.add(skipped_order)
-                    db.commit()
-                    structured["skipped"] += 1
+                structured["details"].append(detail)
+                if outcome == "created":
+                    total_invoices += 1
+                    successful_orders += 1
+                    structured["created"] += 1
+                elif outcome == "skipped":
                     skipped_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "skipped", "message": reason})
-                    continue
-                if preview_status == "mapping_issue":
-                    logger.info("Order %s has mapping_issue preview status but remains eligible for export", order_id)
-
-                if status and status not in {"confirmed", "received", "checked", "ready", "completed", "delivered"}:
-                    logger.info("Order %s has non-ready raw status %s but remains eligible because preview status is ready", order_id, status)
-
-                if self._order_exists(db, order_id):
-                    reason = "Already exported"
-                    logger.info("Skipped duplicate Unify order %s", order_id)
-                    skipped_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="skipped",
-                        message=reason,
-                    )
-                    db.add(skipped_order)
-                    db.commit()
                     structured["skipped"] += 1
-                    skipped_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "already_exported", "message": reason})
-                    continue
-
-                try:
-                    line_items, line_errors = await self._build_line_items(db, order)
-                except ExportServiceError as exc:
-                    reason = str(exc)
-                    logger.error("Failed to build line items for order %s: %s", order_id, reason)
-                    failed_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="failed",
-                        message=reason,
-                    )
-                    db.add(failed_order)
-                    db.commit()
-                    error_messages.append(f"{order_id}: {reason}")
-                    structured["failed"] += 1
+                else:
                     failed_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "failed", "message": reason})
-                    continue
-
-                validation_errors = self._validate_invoice_payload(
-                    order,
-                    contact_name=contact_name,
-                    invoice_date=invoice_date,
-                    line_items=line_items,
-                    line_errors=line_errors,
-                )
-                if validation_errors:
-                    reason = "; ".join(validation_errors)
-                    logger.warning("Order %s failed validation: %s", order_id, reason)
-                    failed_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="failed",
-                        message=reason,
-                    )
-                    db.add(failed_order)
-                    db.commit()
-                    error_messages.append(f"{order_id}: {reason}")
                     structured["failed"] += 1
-                    failed_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "failed", "message": reason})
-                    continue
-
-                try:
-                    contact_id = await self._resolve_contact_for_order(db, order, contact_name or buyer_key)
-                except ZohoServiceError as exc:
-                    reason = str(exc)
-                    logger.error("Failed to resolve Zoho contact for order %s: %s", order_id, reason)
-                    failed_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="failed",
-                        message=reason,
-                    )
-                    db.add(failed_order)
-                    db.commit()
-                    error_messages.append(f"{order_id}: {reason}")
-                    structured["failed"] += 1
-                    failed_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "failed", "message": reason})
-                    continue
-
-                try:
-                    payload = await self._build_draft_invoice_payload(
-                        order,
-                        contact_id,
-                        line_items,
-                        invoice_date or order.order_date,
-                        contact_name or buyer_key,
-                    )
-                    payload_item_ids = [str(line.get("item_id")) for line in line_items if line.get("item_id")]
-                    payload_tax_ids = [str(line.get("tax_id")) for line in line_items if line.get("tax_id")]
-                    logger.info("Zoho payload sent order_id=%s payload=%s", order_id, payload)
-                    invoice_id = await self.zoho_service.create_draft_invoice_from_payload(payload)
-                    logger.info("Zoho response received order_id=%s invoice_id=%s", order_id, invoice_id)
-                    logger.info("Created draft invoice %s for order %s", invoice_id, order_id)
-                    logger.info(
-                        "Zoho invoice payload summary order_id=%s invoice_id=%s item_ids_used=%s tax_ids_used=%s",
-                        order_id,
-                        invoice_id,
-                        payload_item_ids,
-                        payload_tax_ids,
-                    )
-                except ZohoServiceError as exc:
-                    reason = str(exc)
-                    logger.error("Zoho invoice creation failed for order %s: %s", order_id, reason)
-                    failed_order = models.ExportedOrder(
-                        sync_run_id=sync_run.id,
-                        unify_order_id=order_id,
-                        customer_name=contact_name or buyer_key,
-                        status="failed",
-                        message=reason,
-                    )
-                    db.add(failed_order)
-                    db.commit()
-                    error_messages.append(f"{order_id}: {reason}")
-                    structured["failed"] += 1
-                    failed_orders += 1
-                    structured["details"].append({"order_id": order_id, "status": "failed", "message": reason})
-                    continue
-
-                exported_order = models.ExportedOrder(
-                    sync_run_id=sync_run.id,
-                    unify_order_id=order_id,
-                    customer_name=contact_name or buyer_key,
-                    status="exported",
-                    message=f"Invoice {invoice_id} created",
-                )
-                db.add(exported_order)
-                exported_invoice = models.ExportedInvoice(
-                    sync_run_id=sync_run.id,
-                    unify_customer_name=buyer_key,
-                    unify_order_ids=[order_id],
-                    zoho_invoice_id=invoice_id,
-                    status="success",
-                    message="Draft invoice created",
-                )
-                db.add(exported_invoice)
-                db.commit()
-
-                sync_run.total_invoices += 1
-                structured["created"] += 1
-                successful_orders += 1
-                structured["details"].append(
-                    {
-                        "order_id": order_id,
-                        "status": "created",
-                        "zoho_invoice_id": invoice_id,
-                        "message": "Draft invoice created",
-                    }
-                )
+                    if outcome == "needs_verification":
+                        structured["needs_verification"] += 1
+                    error_messages.append(f"{detail.get('order_id')}: {detail.get('message') or detail.get('status')}")
 
             stage = "finalizing_success"
             sync_run.finished_at = datetime.utcnow()
+            sync_run.total_invoices = total_invoices
             if sync_run.total_invoices <= 0:
                 final_status = "failed"
             elif failed_orders == 0 and skipped_orders == 0 and successful_orders > 0:
@@ -1227,6 +1918,7 @@ class ExportService:
                 "created": structured["created"],
                 "skipped": structured["skipped"],
                 "failed": structured["failed"],
+                "needs_verification": structured["needs_verification"],
                 "details": structured["details"],
             }
         except Exception as exc:
@@ -1252,7 +1944,7 @@ class ExportService:
                         error_message=self._format_exception_message(run_error),
                         total_orders=total_orders,
                         total_customers=total_customers,
-                        total_invoices=sync_run.total_invoices,
+                        total_invoices=total_invoices,
                         error_messages=error_messages,
                     )
                 except Exception:
