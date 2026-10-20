@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     UNIFY_DEBUG_SHAPES: bool = Field(default=False)
     UNIFY_DEBUG_MONEY: bool = Field(default=False)
     UNIFY_DEBUG_SAMPLES: bool = Field(default=False)
+    # Shared server-to-server secret (Next.js server <-> this API). Never sent to browsers.
+    ZCONNECT_BACKEND_SECRET: str = Field(default="")
+    ZCONNECT_BACKEND_SECRET_PREVIOUS: str = Field(default="")
+    ZCONNECT_ENABLE_API_DOCS: bool = Field(default=False)
 
     @property
     def normalized_database_url(self) -> str:

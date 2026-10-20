@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAppSession } from "./app-session";
 
 type SettingsState = {
   ZOHO_BASE_URL: string;
@@ -231,6 +232,9 @@ function SparkIcon({ className = "h-5 w-5" }: { className?: string }) {
 }
 
 export function ConnectionsPanel() {
+  // Display only: the backend enforces admin permission for saving and testing connections.
+  const { user } = useAppSession();
+  const isAdmin = user?.role === "admin";
   const [formValues, setFormValues] = useState<SettingsState>(EMPTY_SETTINGS);
   const [initialFormValues, setInitialFormValues] = useState<SettingsState>(EMPTY_SETTINGS);
   const [storedFlags, setStoredFlags] = useState<StoredSettingsFlags>(EMPTY_FLAGS);
@@ -597,25 +601,29 @@ export function ConnectionsPanel() {
         <div className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm sm:flex-row sm:items-center">
           <button
             onClick={handleSave}
-            disabled={isSaving || !hasPendingChanges()}
+            disabled={!isAdmin || isSaving || !hasPendingChanges()}
             className="inline-flex items-center justify-center rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_-14px_rgba(15,23,42,0.8)] transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isSaving ? "Saving..." : "Save settings"}
           </button>
           <button
             onClick={testUnify}
+            disabled={!isAdmin}
             className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
           >
             Test Unify
           </button>
           <button
             onClick={testZoho}
+            disabled={!isAdmin}
             className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
           >
             Test Zoho Connection
           </button>
           <div className="text-sm text-slate-500">
-            {!settingsLoaded
+            {!isAdmin
+              ? "Only admins can change or test connections."
+              : !settingsLoaded
               ? "Loading settings..."
               : hasPendingChanges()
                 ? "You have unsaved changes."

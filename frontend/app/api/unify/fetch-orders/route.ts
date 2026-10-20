@@ -1,10 +1,13 @@
+import { applySignedIdentity, authenticateRequest, withRefreshedSession } from "../../../../lib/backend-auth";
+import type { AuthenticatedUser } from "../../../../lib/backend-auth";
+
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 const BACKEND_TIMEOUT_MS = 95000;
 
 export const runtime = "nodejs";
 export const maxDuration = 90;
 
-export async function POST(request: Request) {
+async function forwardToBackend(request: Request, user: AuthenticatedUser) {
   const requestStartedAt = performance.now();
   try {
     const body = await request.json();
@@ -15,9 +18,11 @@ export async function POST(request: Request) {
     const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
     let res: Response | undefined;
     try {
+      const headers = new Headers({ "Content-Type": "application/json" });
+      applySignedIdentity(headers, "POST", "/api/unify/fetch-orders", "", user);
       res = await fetch(`${BACKEND_URL}/api/unify/fetch-orders`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
         signal: controller.signal,
       });
@@ -82,4 +87,13 @@ export async function POST(request: Request) {
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
+}
+
+// Requires a validated Supabase session; the backend request carries a signed identity.
+export async function POST(request: Request) {
+  const auth = await authenticateRequest(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+  return withRefreshedSession(await forwardToBackend(request, auth.user), auth);
 }

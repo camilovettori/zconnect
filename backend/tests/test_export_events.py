@@ -75,8 +75,12 @@ def summary(db, order_id, tenant="tenant-a"):
     return [(e.event_type, e.previous_status, e.new_status) for e in events(db, tenant, order_id)]
 
 
-def fake_request(actor=None):
-    return SimpleNamespace(headers={"x-zconnect-actor": actor} if actor else {})
+def fake_request(actor=None, role="admin"):
+    """A request whose identity was verified by app.security (as require_identity sets it)."""
+    from app.security import Identity
+
+    identity = Identity(user_id=actor, role=role) if actor else None
+    return SimpleNamespace(headers={}, state=SimpleNamespace(identity=identity) if identity else SimpleNamespace())
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +226,7 @@ def test_concurrent_attempt_is_recorded_as_blocked(session_factory, zoho):
 
 
 def test_reset_routes_record_events_and_never_delete_them(service, zoho, db, monkeypatch):
-    monkeypatch.setattr(routes, "_audit_context", lambda _db, req: AuditContext("tenant-a", req.headers.get("x-zconnect-actor") if req else None))
+    monkeypatch.setattr(routes, "_audit_context", lambda _db, req: AuditContext("tenant-a", getattr(getattr(req, "state", None), "identity", None) and req.state.identity.user_id))
     first = run(service, db, make_order("O-1"), make_order("O-2", "B2"))
     seed_record(db, "O-3", "needs_verification", "evidence")
     before = len(events(db))
@@ -247,16 +251,18 @@ def test_reset_routes_record_events_and_never_delete_them(service, zoho, db, mon
     assert zoho.create_calls == ["O-1", "O-2"]
 
 
-def test_actor_header_reaches_events_through_http(service, zoho, db, monkeypatch):
+def test_actor_comes_from_verified_identity_not_headers(service, zoho, db, sign_request):
     from app.main import app
 
     run(service, db, make_order("O-1"))
     app.dependency_overrides[get_db] = lambda: db
     try:
         with TestClient(app) as client:
-            response = client.post("/api/export/reset-order/O-1", headers={"X-Zconnect-Actor": "user-http"})
+            headers = sign_request("POST", "/api/export/reset-order/O-1", user_id="user-http", role="admin")
+            headers["X-Zconnect-Actor"] = "attacker"  # spoofed: must be ignored
+            response = client.post("/api/export/reset-order/O-1", headers=headers)
     finally:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.pop(get_db, None)
     assert response.status_code == 200
     reset_event = [e for e in list_export_events(db, "default", "O-1") if e.event_type == "reset"]
     assert len(reset_event) == 1 and reset_event[0].actor_id == "user-http"

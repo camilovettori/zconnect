@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AppShell } from "../../components/app-shell";
+import { useAppSession } from "../../components/app-session";
 import { Modal } from "../../components/ui/modal";
 import { PageHeader } from "../../components/ui/page-header";
 import { StatusBadge } from "../../components/ui/status-badge";
@@ -250,6 +251,9 @@ function SearchIcon() {
 }
 
 export default function HistoryPage() {
+  // Display only: the backend enforces admin permission for resets.
+  const { user: sessionUser } = useAppSession();
+  const isAdmin = sessionUser?.role === "admin";
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [selectedDetailId, setSelectedDetailId] = useState<number | null>(null);
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
@@ -556,7 +560,8 @@ export default function HistoryPage() {
                     type="button"
                     className={BUTTON_DANGER}
                     onClick={openResetConfirmation}
-                    disabled={loading || resetting || selectedCount === 0}
+                    disabled={!isAdmin || loading || resetting || selectedCount === 0}
+                    title={isAdmin ? undefined : "Only admins can reset runs"}
                   >
                     Reset selected
                   </button>

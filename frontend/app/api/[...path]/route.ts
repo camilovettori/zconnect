@@ -1,41 +1,6 @@
-import { fetchCurrentUser } from "../../../lib/supabase";
+import { applySignedIdentity, authenticateRequest, withRefreshedSession } from "../../../lib/backend-auth";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
-
-// The backend records this as the actor of export audit events. It is only ever set here,
-// from a session validated server-side; any client-supplied value is removed.
-const ACTOR_HEADER = "x-zconnect-actor";
-const SESSION_COOKIE = "zconnect_session";
-
-function readSessionAccessToken(request: Request): string | null {
-  const cookieHeader = request.headers.get("cookie") || "";
-  for (const part of cookieHeader.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name !== SESSION_COOKIE) {
-      continue;
-    }
-    try {
-      const parsed = JSON.parse(decodeURIComponent(rest.join("=")));
-      return typeof parsed?.access_token === "string" && parsed.access_token ? parsed.access_token : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-async function resolveActorId(request: Request): Promise<string | null> {
-  const accessToken = readSessionAccessToken(request);
-  if (!accessToken) {
-    return null;
-  }
-  try {
-    const user = await fetchCurrentUser(accessToken);
-    return user?.id ? String(user.id) : null;
-  } catch {
-    return null;
-  }
-}
 
 async function proxy(request: Request, pathSegments: string[]) {
   const requestStartedAt = performance.now();
@@ -50,16 +15,17 @@ async function proxy(request: Request, pathSegments: string[]) {
     targetUrl,
   });
 
+  // Every backend request needs a validated session; the backend also verifies a signature.
+  const auth = await authenticateRequest(request);
+  if (!auth.ok) {
+    console.warn("[NextApi] proxy rejected request", { method, path: `/api/${path}`, status: auth.response.status });
+    return auth.response;
+  }
+
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
-  headers.delete(ACTOR_HEADER);
-  if (method !== "GET" && method !== "HEAD" && path.startsWith("export/")) {
-    const actorId = await resolveActorId(request);
-    if (actorId) {
-      headers.set(ACTOR_HEADER, actorId);
-    }
-  }
+  applySignedIdentity(headers, method, `/api/${path}`, url.search, auth.user);
 
   const body = method === "GET" || method === "HEAD" ? undefined : await request.text();
 
@@ -81,10 +47,13 @@ async function proxy(request: Request, pathSegments: string[]) {
       bodyLength: text.length,
     });
 
-    return new Response(text, {
-      status: res.status,
-      headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
-    });
+    return withRefreshedSession(
+      new Response(text, {
+        status: res.status,
+        headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
+      }),
+      auth,
+    );
   } catch (err) {
     console.error("[NextApi] proxy failed", {
       method,

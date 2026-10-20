@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from typing import Any, List
 
 from ..db import get_db
+from ..security import Identity, require_admin, require_identity
 from .. import models
 from ..schemas import (
     ConnectionTestResult,
@@ -38,7 +39,8 @@ from ..services.export_service import (
     soft_reset_export_records,
 )
 
-router = APIRouter()
+# Every route requires a signed identity from the Next.js server (see app/security.py).
+router = APIRouter(dependencies=[Depends(require_identity)])
 logger = logging.getLogger(__name__)
 MASKED_SECRET_VALUE = "********"
 MASKED_SECRET_PATTERN = re.compile(r"^[*\u2022\u25CF\u25AA\u25AB]+$")
@@ -338,7 +340,7 @@ async def get_settings(db: Session = Depends(get_db)):
     return response
 
 
-@router.post("/settings")
+@router.post("/settings", dependencies=[Depends(require_admin)])
 async def post_settings(payload: dict, db: Session = Depends(get_db)):
     logger.info(
         "Settings POST received keys=%s secret_keys=%s",
@@ -373,7 +375,7 @@ async def post_settings(payload: dict, db: Session = Depends(get_db)):
     return APIResponse(ok=True, message="Settings saved")
 
 
-@router.post("/settings/unify/test", response_model=ConnectionTestResult)
+@router.post("/settings/unify/test", response_model=ConnectionTestResult, dependencies=[Depends(require_admin)])
 async def test_unify(db: Session = Depends(get_db)):
     settings = {s.key: s.value for s in db.query(models.Setting).all()}
     svc = UnifyService(
@@ -388,7 +390,7 @@ async def test_unify(db: Session = Depends(get_db)):
         return ConnectionTestResult(ok=False, message=str(e))
 
 
-@router.post("/settings/zoho/test", response_model=ConnectionTestResult)
+@router.post("/settings/zoho/test", response_model=ConnectionTestResult, dependencies=[Depends(require_admin)])
 async def test_zoho(db: Session = Depends(get_db)):
     settings = {s.key: s.value for s in db.query(models.Setting).all()}
     svc = ZohoService(
@@ -610,7 +612,7 @@ async def fetch_order_preview(order_id: str, db: Session = Depends(get_db)):
         )
 
 
-@router.get("/unify/debug-samples")
+@router.get("/unify/debug-samples", dependencies=[Depends(require_admin)])
 async def debug_unify_samples(date_from: str, date_to: str, order_id: str | None = None, db: Session = Depends(get_db)):
     try:
         logger.info(
@@ -889,25 +891,20 @@ async def export_history_detail(id: int, db: Session = Depends(get_db)):
     }
 
 
-ACTOR_HEADER = "x-zconnect-actor"
-
-
 def _audit_context(db: Session, http_request: Request | None) -> AuditContext:
     """Tenant + actor for export events.
 
     tenant_id: TENANT_ID setting, else the configured Zoho organisation id, else "default"
-    (each deployment serves one company). actor_id: the signed-in user id that the Next.js
-    proxy attaches after validating the session; the proxy strips any client-supplied value.
+    (each deployment serves one company). actor_id: the user id from the request's verified,
+    signed identity (app/security.py); no client-supplied header is trusted.
     """
     configured = {
         row.key: (row.value or "").strip()
         for row in db.query(models.Setting).filter(models.Setting.key.in_(["TENANT_ID", "ZOHO_ORG_ID"])).all()
     }
     tenant_id = (configured.get("TENANT_ID") or configured.get("ZOHO_ORG_ID") or "default")[:64]
-    actor_id = None
-    if http_request is not None:
-        raw_actor = (http_request.headers.get(ACTOR_HEADER) or "").strip()
-        actor_id = raw_actor[:128] or None
+    identity = getattr(getattr(http_request, "state", None), "identity", None)
+    actor_id = identity.user_id[:128] if isinstance(identity, Identity) else None
     return AuditContext(tenant_id=tenant_id, actor_id=actor_id)
 
 
@@ -935,7 +932,7 @@ def _soft_reset_response_data(outcome: dict, before: dict, after: dict) -> dict:
     }
 
 
-@router.post("/export/reset-sync-state", response_model=APIResponse)
+@router.post("/export/reset-sync-state", response_model=APIResponse, dependencies=[Depends(require_admin)])
 async def reset_sync_state(db: Session = Depends(get_db), http_request: Request = None):
     """Soft-reset every export record. Nothing is deleted; invoices, run totals and
     history are kept; records that need Zoho verification are left unchanged."""
@@ -963,7 +960,7 @@ async def reset_sync_state(db: Session = Depends(get_db), http_request: Request 
         )
 
 
-@router.post("/export/reset-order/{order_id}", response_model=APIResponse)
+@router.post("/export/reset-order/{order_id}", response_model=APIResponse, dependencies=[Depends(require_admin)])
 async def reset_order(order_id: str, db: Session = Depends(get_db), http_request: Request = None):
     """Soft-reset one order (Unsync). The record, its invoice id and its history are kept;
     the next sync checks Zoho first and links an existing invoice instead of creating one."""
@@ -991,7 +988,7 @@ async def reset_order(order_id: str, db: Session = Depends(get_db), http_request
     )
 
 
-@router.post("/export/reset-selected-runs", response_model=ResetSelectedRunsResponse)
+@router.post("/export/reset-selected-runs", response_model=ResetSelectedRunsResponse, dependencies=[Depends(require_admin)])
 async def reset_selected_runs(request: ResetSelectedRunsRequest, db: Session = Depends(get_db), http_request: Request = None):
     """Soft-reset the export records of the selected runs. Nothing is deleted and the runs
     themselves (status, totals, timestamps) are not rewritten."""
@@ -1055,7 +1052,7 @@ def _make_settings_export_service(db: Session) -> ExportService:
     return make_export_service(unify, zoho)
 
 
-@router.post("/export/reconcile-order/{order_id}", response_model=APIResponse)
+@router.post("/export/reconcile-order/{order_id}", response_model=APIResponse, dependencies=[Depends(require_admin)])
 async def reconcile_order(order_id: str, db: Session = Depends(get_db), http_request: Request = None):
     """Check Zoho for an order that is in_progress (abandoned) or needs_verification.
     Read-only towards Zoho: links an existing invoice, marks the order reset if none exists,

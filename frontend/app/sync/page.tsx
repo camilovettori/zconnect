@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import * as XLSX from "xlsx";
 import { AppShell } from "../../components/app-shell";
+import { useAppSession } from "../../components/app-session";
 import { formatCurrencyEur } from "../utils/money";
 import { Calendar } from "../../components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger, usePopoverContext } from "../../components/ui/popover";
@@ -547,6 +548,9 @@ function AlertIcon() {
 }
 
 export default function SyncPage() {
+  // Display only: the backend enforces admin permission for reset and reconciliation.
+  const { user: sessionUser } = useAppSession();
+  const isAdmin = sessionUser?.role === "admin";
   const [dateFrom, setDateFrom] = useState<Date | null>(null);
   const [dateTo, setDateTo] = useState<Date | null>(null);
   const [orders, setOrders] = useState<UnifiedOrder[]>([]);
@@ -1637,7 +1641,7 @@ export default function SyncPage() {
                               >
                                 Sync this order
                               </button>
-                              {needsZohoCheck(order) ? (
+                              {!isAdmin ? null : needsZohoCheck(order) ? (
                                 <button
                                   type="button"
                                   className={BUTTON_SECONDARY}

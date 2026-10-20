@@ -1,3 +1,6 @@
+import { applySignedIdentity, authenticateRequest, withRefreshedSession } from "../../../../lib/backend-auth";
+import type { AuthenticatedUser } from "../../../../lib/backend-auth";
+
 const BACKEND_URL = process.env.BACKEND_URL || "http://127.0.0.1:8000";
 const BACKEND_TIMEOUT_MS = 95000;
 
@@ -11,7 +14,7 @@ function asJsonResponse(payload: unknown, status: number) {
   });
 }
 
-export async function POST(request: Request) {
+async function forwardToBackend(request: Request, user: AuthenticatedUser) {
   const requestStartedAt = performance.now();
   try {
     const formData = await request.formData();
@@ -39,8 +42,11 @@ export async function POST(request: Request) {
     const timeoutId = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
     let res: Response | undefined;
     try {
+      const headers = new Headers();
+      applySignedIdentity(headers, "POST", "/api/unify/preview-csv", "", user);
       res = await fetch(backendUrl, {
         method: "POST",
+        headers,
         body: forward,
         signal: controller.signal,
       });
@@ -102,4 +108,13 @@ export async function POST(request: Request) {
     });
     return asJsonResponse({ detail: `Proxy error: ${errorMessage}` }, 500);
   }
+}
+
+// Requires a validated Supabase session; the backend request carries a signed identity.
+export async function POST(request: Request) {
+  const auth = await authenticateRequest(request);
+  if (!auth.ok) {
+    return auth.response;
+  }
+  return withRefreshedSession(await forwardToBackend(request, auth.user), auth);
 }

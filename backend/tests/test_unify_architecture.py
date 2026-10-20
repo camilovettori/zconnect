@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from app.api import routes
 from app.db import Base, get_db
 from app.main import app
+from app.security import Identity, require_identity
 from app import models
 from app.schemas import OrderLine, UnifyOrder, UnifyOrderPreview
 from app.services.unify_service import UnifyService
@@ -46,10 +47,13 @@ def test_db():
             pass
 
     app.dependency_overrides[get_db] = override_get_db
+    # These tests cover business logic; authentication is covered by tests/test_api_security.py.
+    app.dependency_overrides[require_identity] = lambda: Identity(user_id="test-admin", role="admin")
     try:
         yield db
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(require_identity, None)
         db.close()
 
 

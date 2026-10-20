@@ -18,6 +18,11 @@ from pathlib import Path
 
 _TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="zconnect-tests-"))
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TEST_DB_DIR / 'test.db').as_posix()}"
+# Test-only server-to-server secret (never a real one); tests that need the "missing
+# secret" behaviour remove it with monkeypatch.
+TEST_BACKEND_SECRET = "zconnect-test-secret-" + "0123456789abcdef" * 3
+os.environ["ZCONNECT_BACKEND_SECRET"] = TEST_BACKEND_SECRET
+os.environ.pop("ZCONNECT_BACKEND_SECRET_PREVIOUS", None)
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
@@ -48,3 +53,22 @@ def _disable_real_network(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _blocked_sync_transport)
     yield
 
+
+@pytest.fixture()
+def sign_request():
+    """Build the signed identity headers the Next.js server would send."""
+    import time
+
+    from app.security import compute_signature
+
+    def _sign(method, path, query="", user_id="test-admin", role="admin", secret=TEST_BACKEND_SECRET, timestamp=None):
+        ts = str(int(time.time()) if timestamp is None else timestamp)
+        signature = compute_signature(secret.encode("utf-8"), method, path, query, ts, user_id, role)
+        return {
+            "X-Zconnect-User": user_id,
+            "X-Zconnect-Role": role,
+            "X-Zconnect-Timestamp": ts,
+            "X-Zconnect-Signature": signature,
+        }
+
+    return _sign
