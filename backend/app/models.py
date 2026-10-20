@@ -105,9 +105,13 @@ class ExportEvent(Base):
     The application only ever inserts rows; database triggers created by migration
     0002_export_events reject UPDATE and DELETE. Rows hold no credentials or invoice
     payloads: only identifiers, statuses and a short sanitised diagnostic.
+
+    The production database is shared with other applications, so this table and its
+    indexes, function and triggers carry a zconnect_ prefix. An unrelated table named
+    export_events may exist there and is never used.
     """
 
-    __tablename__ = "export_events"
+    __tablename__ = "zconnect_export_events"
 
     id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     tenant_id = Column(String(64), nullable=False)
@@ -123,8 +127,8 @@ class ExportEvent(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, server_default=func.now())
 
     __table_args__ = (
-        Index("ix_export_events_tenant_order", "tenant_id", "unify_order_id", "id"),
-        Index("ix_export_events_tenant_created", "tenant_id", "created_at"),
-        Index("ix_export_events_sync_run", "sync_run_id"),
-        Index("ix_export_events_export_record", "export_record_id"),
+        Index("ix_zconnect_export_events_tenant_order", "tenant_id", "unify_order_id", "id"),
+        Index("ix_zconnect_export_events_tenant_created", "tenant_id", "created_at"),
+        Index("ix_zconnect_export_events_sync_run", "sync_run_id"),
+        Index("ix_zconnect_export_events_export_record", "export_record_id"),
     )

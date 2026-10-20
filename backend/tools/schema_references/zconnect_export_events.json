@@ -1,0 +1,148 @@
+{
+ "description": "Definition of zconnect_export_events created by migration 0002_export_events on PostgreSQL 17 (columns, constraints, indexes, append-only trigger). Compared exactly by the preflight and post-migration checks.",
+ "definition": {
+  "columns": [
+   [
+    "actor_id",
+    "character varying",
+    128,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "created_at",
+    "timestamp with time zone",
+    null,
+    "NO",
+    "now()",
+    "NO"
+   ],
+   [
+    "detail",
+    "character varying",
+    500,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "event_type",
+    "character varying",
+    48,
+    "NO",
+    "",
+    "NO"
+   ],
+   [
+    "export_record_id",
+    "integer",
+    null,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "id",
+    "bigint",
+    null,
+    "NO",
+    "nextval('zconnect_export_events_id_seq')",
+    "NO"
+   ],
+   [
+    "new_status",
+    "character varying",
+    32,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "previous_status",
+    "character varying",
+    32,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "sync_run_id",
+    "integer",
+    null,
+    "YES",
+    "",
+    "NO"
+   ],
+   [
+    "tenant_id",
+    "character varying",
+    64,
+    "NO",
+    "",
+    "NO"
+   ],
+   [
+    "unify_order_id",
+    "character varying",
+    128,
+    "NO",
+    "",
+    "NO"
+   ],
+   [
+    "zoho_invoice_id",
+    "character varying",
+    128,
+    "YES",
+    "",
+    "NO"
+   ]
+  ],
+  "constraints": [
+   [
+    "zconnect_export_events_export_record_id_fkey",
+    "f",
+    "FOREIGN KEY (export_record_id) REFERENCES exported_orders(id) ON DELETE RESTRICT"
+   ],
+   [
+    "zconnect_export_events_pkey",
+    "p",
+    "PRIMARY KEY (id)"
+   ],
+   [
+    "zconnect_export_events_sync_run_id_fkey",
+    "f",
+    "FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id) ON DELETE RESTRICT"
+   ]
+  ],
+  "indexes": [
+   [
+    "ix_zconnect_export_events_export_record",
+    "CREATE INDEX ix_zconnect_export_events_export_record ON public.zconnect_export_events USING btree (export_record_id)"
+   ],
+   [
+    "ix_zconnect_export_events_sync_run",
+    "CREATE INDEX ix_zconnect_export_events_sync_run ON public.zconnect_export_events USING btree (sync_run_id)"
+   ],
+   [
+    "ix_zconnect_export_events_tenant_created",
+    "CREATE INDEX ix_zconnect_export_events_tenant_created ON public.zconnect_export_events USING btree (tenant_id, created_at)"
+   ],
+   [
+    "ix_zconnect_export_events_tenant_order",
+    "CREATE INDEX ix_zconnect_export_events_tenant_order ON public.zconnect_export_events USING btree (tenant_id, unify_order_id, id)"
+   ],
+   [
+    "zconnect_export_events_pkey",
+    "CREATE UNIQUE INDEX zconnect_export_events_pkey ON public.zconnect_export_events USING btree (id)"
+   ]
+  ],
+  "triggers": [
+   [
+    "zconnect_export_events_no_update_delete",
+    "CREATE TRIGGER zconnect_export_events_no_update_delete BEFORE DELETE OR UPDATE ON public.zconnect_export_events FOR EACH ROW EXECUTE FUNCTION zconnect_export_events_append_only()"
+   ]
+  ]
+ }
+}

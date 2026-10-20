@@ -1,7 +1,11 @@
-"""export_events: append-only audit history of export operations
+"""zconnect_export_events: append-only audit history of export operations
 
 Additive only: creates one new table (plus indexes and append-only triggers). Existing
 tables and rows are not modified, rewritten or backfilled.
+
+The production database is shared with other applications, so every object created here
+carries a zconnect_ prefix. An unrelated table named export_events may already exist there;
+this migration never reads, alters or drops it.
 
 Revision ID: 0002_export_events
 Revises: 0001_initial
@@ -16,10 +20,21 @@ down_revision = "0001_initial"
 branch_labels = None
 depends_on = None
 
+TABLE = "zconnect_export_events"
+FUNCTION = "zconnect_export_events_append_only"
+PG_TRIGGER = "zconnect_export_events_no_update_delete"
+SQLITE_TRIGGERS = ("zconnect_export_events_no_update", "zconnect_export_events_no_delete")
+INDEXES = {
+    "ix_zconnect_export_events_tenant_order": ["tenant_id", "unify_order_id", "id"],
+    "ix_zconnect_export_events_tenant_created": ["tenant_id", "created_at"],
+    "ix_zconnect_export_events_sync_run": ["sync_run_id"],
+    "ix_zconnect_export_events_export_record": ["export_record_id"],
+}
+
 
 def upgrade():
     op.create_table(
-        "export_events",
+        TABLE,
         sa.Column("id", sa.BigInteger().with_variant(sa.Integer(), "sqlite"), primary_key=True, autoincrement=True),
         sa.Column("tenant_id", sa.String(length=64), nullable=False),
         sa.Column("unify_order_id", sa.String(length=128), nullable=False),
@@ -33,34 +48,32 @@ def upgrade():
         sa.Column("detail", sa.String(length=500), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("ix_export_events_tenant_order", "export_events", ["tenant_id", "unify_order_id", "id"])
-    op.create_index("ix_export_events_tenant_created", "export_events", ["tenant_id", "created_at"])
-    op.create_index("ix_export_events_sync_run", "export_events", ["sync_run_id"])
-    op.create_index("ix_export_events_export_record", "export_events", ["export_record_id"])
+    for name, columns in INDEXES.items():
+        op.create_index(name, TABLE, columns)
 
     dialect = op.get_bind().dialect.name
     if dialect == "postgresql":
         op.execute(
-            """
-            CREATE FUNCTION export_events_append_only() RETURNS trigger AS $$
+            f"""
+            CREATE FUNCTION {FUNCTION}() RETURNS trigger AS $$
             BEGIN
-                RAISE EXCEPTION 'export_events is append-only (% rejected)', TG_OP;
+                RAISE EXCEPTION '{TABLE} is append-only (% rejected)', TG_OP;
             END;
             $$ LANGUAGE plpgsql;
             """
         )
         op.execute(
-            "CREATE TRIGGER export_events_no_update_delete BEFORE UPDATE OR DELETE ON export_events "
-            "FOR EACH ROW EXECUTE FUNCTION export_events_append_only();"
+            f"CREATE TRIGGER {PG_TRIGGER} BEFORE UPDATE OR DELETE ON {TABLE} "
+            f"FOR EACH ROW EXECUTE FUNCTION {FUNCTION}();"
         )
     elif dialect == "sqlite":
         op.execute(
-            "CREATE TRIGGER export_events_no_update BEFORE UPDATE ON export_events "
-            "BEGIN SELECT RAISE(ABORT, 'export_events is append-only (UPDATE rejected)'); END;"
+            f"CREATE TRIGGER {SQLITE_TRIGGERS[0]} BEFORE UPDATE ON {TABLE} "
+            f"BEGIN SELECT RAISE(ABORT, '{TABLE} is append-only (UPDATE rejected)'); END;"
         )
         op.execute(
-            "CREATE TRIGGER export_events_no_delete BEFORE DELETE ON export_events "
-            "BEGIN SELECT RAISE(ABORT, 'export_events is append-only (DELETE rejected)'); END;"
+            f"CREATE TRIGGER {SQLITE_TRIGGERS[1]} BEFORE DELETE ON {TABLE} "
+            f"BEGIN SELECT RAISE(ABORT, '{TABLE} is append-only (DELETE rejected)'); END;"
         )
 
 
@@ -69,13 +82,11 @@ def downgrade():
     # downgrade in production only under an approved plan (export the table first).
     dialect = op.get_bind().dialect.name
     if dialect == "postgresql":
-        op.execute("DROP TRIGGER IF EXISTS export_events_no_update_delete ON export_events;")
-        op.execute("DROP FUNCTION IF EXISTS export_events_append_only();")
+        op.execute(f"DROP TRIGGER IF EXISTS {PG_TRIGGER} ON {TABLE};")
+        op.execute(f"DROP FUNCTION IF EXISTS {FUNCTION}();")
     elif dialect == "sqlite":
-        op.execute("DROP TRIGGER IF EXISTS export_events_no_update;")
-        op.execute("DROP TRIGGER IF EXISTS export_events_no_delete;")
-    op.drop_index("ix_export_events_export_record", table_name="export_events")
-    op.drop_index("ix_export_events_sync_run", table_name="export_events")
-    op.drop_index("ix_export_events_tenant_created", table_name="export_events")
-    op.drop_index("ix_export_events_tenant_order", table_name="export_events")
-    op.drop_table("export_events")
+        for trigger in SQLITE_TRIGGERS:
+            op.execute(f"DROP TRIGGER IF EXISTS {trigger};")
+    for name in reversed(list(INDEXES)):
+        op.drop_index(name, table_name=TABLE)
+    op.drop_table(TABLE)

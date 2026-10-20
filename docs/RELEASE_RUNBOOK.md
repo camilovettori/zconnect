@@ -1,12 +1,14 @@
 # Zconnect release runbook — security & invoice-safety release
 
-Release commit: **`dea72a0`** (application code identical to the tested candidate `a6dfb2f`).
+Release commit: **`<RELEASE_COMMIT>`**, the tip of the `release` branch (`git rev-parse --short release`). It must contain the commit “Isolate Zconnect migration objects in the shared Supabase database”. Record the hash in the release ticket and use that exact hash everywhere below.
 
-This release adds signed Next.js → FastAPI requests (HMAC v2 with a body digest), cross-site request protection, server-side session validation, invoice idempotency with Soft Reset and Zoho reconciliation, and the append-only `export_events` audit table (migration `0002_export_events`).
+This release adds signed Next.js → FastAPI requests (HMAC v2 with a body digest), cross-site request protection, server-side session validation, invoice idempotency with Soft Reset and Zoho reconciliation, and the append-only `zconnect_export_events` audit table (migration `0002_export_events`, Alembic history in `zconnect_alembic_version`).
+
+**Shared database.** Production runs in the same Supabase project as ZRecipe. Every object Zconnect adds carries a `zconnect_` prefix. A table named `public.export_events` (13 columns, unknown owner) and possibly a `public.alembic_version` belong to someone else: they are reported for information only and must never be modified, adopted or dropped as part of this release.
 
 **🔒 = changes or contacts production. Each 🔒 step needs explicit approval before it is run.** Steps without 🔒 are local actions or read-only dashboard checks.
 
-Placeholders: `<RENDER_URL>` (e.g. `https://<service>.onrender.com`), `<APP_URL>` (production frontend URL), `<POOLER_HOST>` and `<PROJECT_REF>` (Supabase → Connect → Session pooler), `<MAJOR>` (PostgreSQL major version reported by the preflight), `<SECURE_DIR>` (encrypted storage outside the repository). Never paste secrets into this document, a terminal command line, a ticket or a chat.
+Placeholders: `<RELEASE_COMMIT>` (above), `<RENDER_URL>` (e.g. `https://<service>.onrender.com`), `<APP_URL>` (production frontend URL), `<POOLER_HOST>` and `<PROJECT_REF>` (Supabase → Connect → Session pooler), `<MAJOR>` (PostgreSQL major version reported by the preflight), `<SECURE_DIR>` (encrypted storage outside the repository). Never paste secrets into this document, a terminal command line, a ticket or a chat.
 
 ---
 
@@ -16,12 +18,14 @@ The frontend signs every API request with HMAC v2; the backend rejects anything 
 
 | Frontend | Backend | Result |
 |---|---|---|
-| `dea72a0`, `aedb80c` or `a8c8f79` | `dea72a0` | ✅ supported (target / frontend-only rollback) |
-| `e49d3d0` | `e49d3d0` | ✅ authenticated fallback pair (HMAC v1; no body digest or CSRF origin check) |
-| v2 frontend | `e49d3d0`, or the reverse | ⛔ every API call returns 401 (fails closed: outage, not a hole) |
-| any | `c7affae` or earlier, or any pre-release deployment | ⛔ **never**: the backend is unauthenticated (anyone can trigger Zoho exports, resets and settings changes); before `c7affae` there is no invoice idempotency either |
+| `<RELEASE_COMMIT>`, `71b88e8`, `dea72a0`, `aedb80c` or `a8c8f79` (identical HMAC v2 frontend) | `<RELEASE_COMMIT>` | ✅ supported (target / frontend-only rollback) |
+| any | `a8c8f79` … `71b88e8` | ⛔ **never in the shared database**: these backends use the generic table name `export_events`, which already exists there and belongs to another application. Their startup check would accept it and audit writes would go to it |
+| any | `c7affae`, `e49d3d0` | ⛔ same `export_events` collision; `c7affae` is also unauthenticated |
+| any | before `c7affae`, or any pre-release deployment | ⛔ **never**: the backend is unauthenticated (anyone can trigger Zoho exports, resets and settings changes) and has no invoice idempotency |
 
-Never use Render's **Rollback** or Vercel's **Instant Rollback** to a deployment made before this release, and never run `alembic downgrade` once `export_events` holds rows.
+Consequence: there is **no older backend to roll back to**. A backend problem is handled by suspending the Render service (safe outage) and fixing forward (§5).
+
+Never use Render's **Rollback** or Vercel's **Instant Rollback** to a deployment made before this release, and never run `alembic downgrade` once `zconnect_export_events` holds rows.
 
 ---
 
@@ -114,8 +118,8 @@ Set-Clipboard -Value " "
 
 Both tools live in `backend/tools/` and are covered by `backend/tests/test_schema_preflight.py`.
 
-* `schema_preflight.py`: **read-only**. The session runs with `default_transaction_read_only=on` and a statement timeout, and selects only catalogs, row counts and setting **names**. Reports the target, schema match against the bundled `0001_initial` references (`tools/schema_references/`), `alembic_version`, `export_events`, status distributions, RLS state and Supabase API-role grants.
-* `run_migration.py`: guarded `stamp 0001_initial` / `upgrade 0002_export_events`. It refuses unless host, database and role match the expected values, `--backup-verified` is given, and the database is in the right state (see the decision table in §3.3). It never upgrades to `head`.
+* `schema_preflight.py`: **read-only**. The session runs with `default_transaction_read_only=on` and a statement timeout, and selects only catalogs, row counts and setting **names**. Reports the target, the match of Zconnect's seven original tables against the bundled `0001_initial` references (`tools/schema_references/`), the state of Zconnect's migration objects (`zconnect_alembic_version`, `zconnect_export_events` compared exactly against `zconnect_export_events.json`), foreign objects (`public.export_events`, `public.alembic_version`, informational), status distributions, RLS state and Supabase API-role grants.
+* `run_migration.py`: guarded `stamp 0001_initial` / `upgrade 0002_export_events`. It refuses unless host, database and role match the expected values, `--backup-verified` is given, and the database is in the state the action requires (§3.3). It never upgrades to `head` and never touches objects without the `zconnect_` prefix other than Zconnect's seven original tables, which it does not modify either.
 
 Both read the URL **only** from the `DATABASE_URL` environment variable: never from `backend/.env`, never from the SQLite fallbacks in `app/config.py` or `alembic.ini`.
 
@@ -141,13 +145,17 @@ Close the session (or `Remove-Item Env:DATABASE_URL`) when done.
 
 ### 3.3 Decision table (from `compare`)
 
-The output must end with `SCHEMA MATCHES 0001_initial (...)`.
+The last line of `compare` states the database's state. Only the two *ready* states print `SCHEMA MATCHES`.
 
-| `alembic_version` | `export_events_exists` | Action |
+| Last line | State | Action |
 |---|---|---|
-| `null` | `false` | stamp, then upgrade (expected: production tables were created by the app's startup) |
-| `['0001_initial']` | `false` | upgrade only |
-| anything else, or `SCHEMA DIFFERS` | — | **stop**; do not stamp or upgrade |
+| `SCHEMA MATCHES 0001_initial (...): unversioned, ready to stamp` | `ready_to_stamp` | stamp, then upgrade (expected: production tables were created by the app's startup) |
+| `SCHEMA MATCHES 0001_initial (...): at 0001_initial, ready to upgrade` | `ready_to_upgrade` | upgrade only |
+| `ALREADY MIGRATED to 0002_export_events: nothing to do` | `migrated` | no migration; continue with W5 only if this was expected |
+| `INCOMPATIBLE ZCONNECT OBJECTS PRESENT: ...` | `incompatible` | **stop**: a `zconnect_*` object exists without a matching version, or differs from the reference (the `PROBLEM:` lines list the exact differences) |
+| `SCHEMA DIFFERS from every 0001_initial reference: ...` | `schema_differs` | **stop**; do not stamp or upgrade |
+
+Lines starting with `INFO:` describe foreign objects such as `public.export_events` (expected in production: 13 columns, 0 rows, 5 indexes, 0 custom triggers). They never block and are never modified. If their description changes between the preflight and the post-check, the post-check fails.
 
 Also read `rls_disabled_tables` and `api_role_grants`. Grants to `anon` / `authenticated` on public tables mean the Supabase Data API may expose them. Remediation is a separate, approved change and is not part of this release.
 
@@ -155,10 +163,13 @@ Also read `rls_disabled_tables` and `api_role_grants`. Grants to `anon` / `authe
 
 Requires `pg_dump` / `pg_restore` with a major version ≥ the `server_version` shown by the preflight. Docker is used for a throwaway restore target.
 
+The dump is limited to Zconnect's seven tables (their id sequences are included automatically). The `public` schema also holds ZRecipe's tables and customer data, which must not be exported by this procedure, and whose Supabase-specific policies would not restore into a plain PostgreSQL.
+
 ```powershell
 & $py tools\schema_preflight.py dump pre_migration_snapshot.json
 $pg = $env:DATABASE_URL -replace '^postgresql\+psycopg://','postgresql://'; $ts = Get-Date -Format yyyyMMdd-HHmm
-pg_dump --format=custom --no-owner --no-privileges --schema=public --file "<SECURE_DIR>\zconnect-pre-0002-$ts.dump" $pg
+$tables = "settings","sync_runs","exported_orders","exported_invoices","customer_mappings","item_mappings","zoho_item_mappings" | ForEach-Object { "--table=public.$_" }
+pg_dump --format=custom --no-owner --no-privileges @tables --file "<SECURE_DIR>\zconnect-pre-0002-$ts.dump" $pg
 Remove-Variable pg
 
 docker run --name zc-restore -e POSTGRES_PASSWORD=restorecheck -p 127.0.0.1:55499:5432 -d postgres:<MAJOR>
@@ -177,11 +188,11 @@ docker rm -f zc-restore
 ### 3.5 Migration (🔒)
 
 ```powershell
-& $py tools\run_migration.py @guard status
-& $py tools\run_migration.py @guard --backup-verified stamp      # only if alembic_version was null
-& $py tools\run_migration.py @guard --backup-verified upgrade    # expect: done: alembic_version=['0002_export_events']
+& $py tools\run_migration.py @guard status                       # expect state=ready_to_stamp and the info: lines for foreign objects
+& $py tools\run_migration.py @guard --backup-verified stamp      # only in state ready_to_stamp
+& $py tools\run_migration.py @guard --backup-verified upgrade    # expect: done: state=migrated zconnect_alembic_version=['0002_export_events']
 ```
-Expected changes: one new table `export_events` (12 columns), 4 indexes, the function `export_events_append_only()` and the trigger `export_events_no_update_delete`. No existing table or row is modified. PostgreSQL runs the DDL in one transaction: a failure rolls back completely.
+Expected changes, all new and all prefixed: the version table `zconnect_alembic_version` (created by the stamp), the table `zconnect_export_events` (12 columns), its 4 indexes `ix_zconnect_export_events_*`, the function `zconnect_export_events_append_only()` and the trigger `zconnect_export_events_no_update_delete`. No existing table or row is modified, including `public.export_events` and `public.alembic_version`. PostgreSQL runs the DDL in one transaction: a failure rolls back completely.
 
 ### 3.6 Post-migration checks
 
@@ -189,7 +200,7 @@ Expected changes: one new table `export_events` (12 columns), 4 indexes, the fun
 & $py tools\schema_preflight.py postcheck pre_migration_snapshot.json
 Remove-Item Env:DATABASE_URL
 ```
-All seven checks must print `PASS`: version `0002_export_events`, table present, primary key + 4 indexes, append-only trigger, table empty, existing row counts unchanged, `exported_orders` statuses unchanged. On any `FAIL`: stay in maintenance, do not deploy, review.
+All six checks must print `PASS`: `zconnect_alembic_version` is `0002_export_events`; `zconnect_export_events` matches the bundled definition exactly (columns, constraints, indexes, append-only trigger); it is empty; Zconnect's existing row counts and `exported_orders` statuses are unchanged; the foreign objects (`public.export_events`, `public.alembic_version`) are unchanged. On any `FAIL`: stay in maintenance, do not deploy, review.
 
 If the upgrade fails: verify with `compare` that the schema is unchanged, do not deploy the new backend, and end the window on the previous version.
 
@@ -203,7 +214,8 @@ If the upgrade fails: verify with `compare` that the schema is unchanged, do not
 |---|---|
 | P1 | 🔒 Render: Auto-Deploy **Off**; Health Check Path `/`. Confirm no deploy started (Events). |
 | P2 | 🔒 Vercel: Production Branch → `release`; add `ZCONNECT_BACKEND_SECRET` (Production only); confirm Preview has neither the secret nor `SUPABASE_SERVICE_ROLE_KEY`. |
-| P3 | 🔒 `git push origin main` (`dea72a0` plus documentation-only commits). Confirm Render started **no** deploy and Vercel created only a **Preview**. Deploy steps below always name the exact commit `dea72a0`. |
+| P0 | Local: `git log --oneline -1 --grep "Isolate Zconnect migration objects" release` prints the isolation commit (otherwise **stop**: an older backend would collide with `public.export_events`), and `git rev-parse --short release` gives `<RELEASE_COMMIT>`. |
+| P3 | 🔒 `git push origin main` (fast-forward; `main` and `release` point at `<RELEASE_COMMIT>`). Confirm Render started **no** deploy and Vercel created only a **Preview**. |
 | P4 | 🔒 Read-only preflight (§3.2, §3.3); admin roles checked (§2). |
 
 ### Release window
@@ -214,8 +226,8 @@ If the upgrade fails: verify with `compare` that the schema is unchanged, do not
 | W2 | 🔒 Render: **Suspend** the service (stops the previous, unauthenticated API; no sync can run). |
 | W3 | 🔒 Snapshot, backup and restore verification (§3.4) until `RESTORE VERIFIED`. |
 | W4 | 🔒 Migration (§3.5) and post-migration checks (§3.6): all `PASS`. |
-| W5 | 🔒 Render: Environment → add `ZCONNECT_BACKEND_SECRET` (choose **Save only** if offered); confirm `DATABASE_URL` present and the docs flag absent → **Resume** → **Manual Deploy → Deploy a specific commit → `dea72a0`**. Logs must not show `export_events table is missing` or `ZCONNECT_BACKEND_SECRET is missing`. Then run the backend checks below. |
-| W6 | 🔒 `git push origin dea72a0:refs/heads/release` → Vercel builds production from `dea72a0`; confirm the deployment shows that commit. |
+| W5 | 🔒 Render: Environment → add `ZCONNECT_BACKEND_SECRET` (choose **Save only** if offered); confirm `DATABASE_URL` present and the docs flag absent → **Resume** → **Manual Deploy → Deploy a specific commit → `<RELEASE_COMMIT>`**. Logs must not show `zconnect_export_events table is missing` or `ZCONNECT_BACKEND_SECRET is missing`. Then run the backend checks below. |
+| W6 | 🔒 `git push origin release` → Vercel builds production from `<RELEASE_COMMIT>`; confirm the deployment shows that commit. |
 | W7 | Read-only smoke tests (below). |
 | W8 | End the window. 🔒 The first controlled invoice synchronisation is a separate approval. |
 
@@ -244,11 +256,11 @@ Forbidden during smoke tests: Sync, Sync this order, Reset / Unsync, Reconcile, 
 
 | Problem | Action |
 |---|---|
-| Frontend only | `git push --force-with-lease origin aedb80c:refs/heads/release` (or `a8c8f79`). The backend stays on `dea72a0`. |
-| Backend | Preferred: Render → **Suspend** (safe outage), then fix forward. If an older authenticated version is required: Render → Manual Deploy → specific commit **`e49d3d0`** *and* `git push --force-with-lease origin e49d3d0:refs/heads/release`. Same secret; the migrated schema is compatible. |
-| Migration failed during W4 | The transaction rolled back. Do not deploy. Resume the previous backend only if service must be restored before a new window. |
+| Frontend only | `git push --force-with-lease origin aedb80c:refs/heads/release` (or `a8c8f79`; both are HMAC v2 frontends). The backend stays on `<RELEASE_COMMIT>`. |
+| Backend | Render → **Suspend** (safe outage), then fix forward with a new reviewed commit. There is no older compatible backend: every backend before `<RELEASE_COMMIT>` either is unauthenticated or uses the generic `export_events` name that collides with the foreign table (§1). |
+| Migration failed during W4 | The transaction rolled back. Do not deploy. Resume the previous backend only if service must be restored before a new window (it does not use the new objects). |
 | Data corruption | Restore from the verified backup (separate approved procedure). |
 
 After any backend rollback, rerun the backend checks: the unsigned request **must** return 401.
 
-Never: Render **Rollback** or Vercel **Instant Rollback** to a pre-release deployment (the old backend would *silently work* with the new frontend while its API is open to anyone); any commit at or before `c7affae`; `alembic downgrade` once `export_events` has rows. If no authenticated version can run, keep the backend suspended.
+Never: Render **Rollback** or Vercel **Instant Rollback** to a pre-release deployment (the old backend would *silently work* with the new frontend while its API is open to anyone); any backend commit before `<RELEASE_COMMIT>`; `alembic downgrade` once `zconnect_export_events` has rows; any change to `public.export_events` or `public.alembic_version`. If no authenticated version can run, keep the backend suspended.

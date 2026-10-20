@@ -219,7 +219,7 @@ def test_postgres_history_reset_keeps_everything(pg_factory):
 
 
 # ---------------------------------------------------------------------------
-# export_events on PostgreSQL: concurrent events, migration and append-only triggers
+# zconnect_export_events on PostgreSQL: concurrent events, migration and append-only triggers
 # ---------------------------------------------------------------------------
 
 
@@ -270,9 +270,9 @@ def test_postgres_migration_upgrade_downgrade_and_append_only(pg_factory, monkey
     from sqlalchemy.exc import DatabaseError
 
     engine = pg_factory.kw["bind"]
-    # Production-like start: tables from create_all (no export_events, no alembic_version), with data.
+    # Production-like start: tables from create_all (no zconnect_export_events, no zconnect_alembic_version), with data.
     Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO sync_runs (id, status, date_from, date_to, total_orders, total_customers, total_invoices) VALUES (1, 'success', '2026-09-01', '2026-09-01', 1, 1, 1)"))
         conn.execute(text("INSERT INTO exported_orders (id, sync_run_id, unify_order_id, customer_name, status, message) VALUES (1, 1, 'L-1', 'Customer', 'exported', 'Invoice ZINV-1 created')"))
@@ -281,23 +281,23 @@ def test_postgres_migration_upgrade_downgrade_and_append_only(pg_factory, monkey
     config = _pg_alembic_config(monkeypatch)
     command.stamp(config, "0001_initial")
     command.upgrade(config, "head")
-    assert "export_events" in inspect(engine).get_table_names()
+    assert "zconnect_export_events" in inspect(engine).get_table_names()
     with engine.begin() as conn:
         assert [tuple(r) for r in conn.execute(text("SELECT * FROM exported_orders ORDER BY id"))] == before
-        conn.execute(text("INSERT INTO export_events (tenant_id, unify_order_id, export_record_id, sync_run_id, event_type, new_status) VALUES ('t', 'L-1', 1, 1, 'claimed', 'in_progress')"))
-    for statement in ("UPDATE export_events SET event_type = 'tampered'", "DELETE FROM export_events"):
+        conn.execute(text("INSERT INTO zconnect_export_events (tenant_id, unify_order_id, export_record_id, sync_run_id, event_type, new_status) VALUES ('t', 'L-1', 1, 1, 'claimed', 'in_progress')"))
+    for statement in ("UPDATE zconnect_export_events SET event_type = 'tampered'", "DELETE FROM zconnect_export_events"):
         with pytest.raises(DatabaseError, match="append-only"):
             with engine.begin() as conn:
                 conn.execute(text(statement))
     with engine.begin() as conn:
-        assert conn.execute(text("SELECT event_type FROM export_events")).scalar() == "claimed"
+        assert conn.execute(text("SELECT event_type FROM zconnect_export_events")).scalar() == "claimed"
         # Foreign keys: an event cannot point to a missing record or run.
         with pytest.raises(DatabaseError):
             with conn.begin_nested():
-                conn.execute(text("INSERT INTO export_events (tenant_id, unify_order_id, export_record_id, event_type) VALUES ('t', 'X', 999, 'claimed')"))
+                conn.execute(text("INSERT INTO zconnect_export_events (tenant_id, unify_order_id, export_record_id, event_type) VALUES ('t', 'X', 999, 'claimed')"))
 
     command.downgrade(config, "0001_initial")
-    assert "export_events" not in inspect(engine).get_table_names()
+    assert "zconnect_export_events" not in inspect(engine).get_table_names()
     with engine.begin() as conn:
         assert [tuple(r) for r in conn.execute(text("SELECT * FROM exported_orders ORDER BY id"))] == before
-        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        conn.execute(text("DROP TABLE IF EXISTS zconnect_alembic_version"))

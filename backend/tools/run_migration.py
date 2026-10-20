@@ -8,11 +8,15 @@ the release runbook requires, so a typo or a stray .env cannot migrate the wrong
   * --expected-host and --expected-database must match that URL (and --expected-user, if
     given); otherwise nothing is done.
   * `status` is read-only. `stamp` and `upgrade` also require --backup-verified.
-  * stamp: only on an unversioned database (no alembic_version), without export_events,
-    whose schema matches a bundled 0001_initial reference.
-  * upgrade: only from exactly 0001_initial, without export_events, with a matching
-    schema; upgrades to 0002_export_events (not "head"), so later migrations are never
-    applied by accident. PostgreSQL runs the DDL in one transaction.
+  * The database state comes from tools/schema_preflight.py (one shared classification):
+      stamp   only in state ready_to_stamp   (no zconnect_alembic_version, no Zconnect audit objects,
+                                              original tables matching a 0001_initial reference)
+      upgrade only in state ready_to_upgrade (zconnect_alembic_version = 0001_initial)
+    upgrade targets 0002_export_events (not "head"), so later migrations are never applied by
+    accident. PostgreSQL runs the DDL in one transaction.
+  * Objects other applications may own in the shared database (public.export_events,
+    public.alembic_version) are reported for information and never touched: Zconnect uses
+    zconnect_export_events and zconnect_alembic_version.
 
 Usage (from backend/):
   python tools/run_migration.py --expected-host H --expected-database postgres status
@@ -25,26 +29,25 @@ import argparse
 import importlib.util
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
-BASE_REVISION = "0001_initial"
-TARGET_REVISION = "0002_export_events"
 
 _spec = importlib.util.spec_from_file_location("schema_preflight", Path(__file__).resolve().parent / "schema_preflight.py")
 preflight = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(preflight)
+
+REQUIRED_STATE = {"stamp": "ready_to_stamp", "upgrade": "ready_to_upgrade"}
 
 
 class MigrationRefused(RuntimeError):
     pass
 
 
-def _inspect(url: str):
+def _inspect(url: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     with preflight.connect_read_only(url) as conn:
-        schema, info = preflight.snapshot(conn)
-    matched, _differences = preflight.compare(schema, preflight.load_references())
-    return info, matched
+        _schema, info, _differences, assessment = preflight.inspect_database(conn)
+    return info, assessment
 
 
 def _alembic_config(url: str):
@@ -62,6 +65,19 @@ def _alembic_config(url: str):
     config.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
     config.set_main_option("sqlalchemy.url", sqlalchemy_url)
     return config
+
+
+def _report(info: Dict[str, Any], assessment: Dict[str, Any]) -> None:
+    print(
+        f"state={assessment['state']} {preflight.VERSION_TABLE}={info['zconnect_alembic_version']} "
+        f"{preflight.AUDIT_TABLE}_exists={info['zconnect_export_events_exists']} schema_reference={assessment['matched']}"
+    )
+    print(f"row_counts={info['row_counts']}")
+    for name, details in info["foreign_objects"].items():
+        if details["exists"]:
+            print(f"info: {name} exists ({details['columns']} columns, {details['rows']} rows): not a Zconnect object, ignored")
+    for problem in assessment["problems"]:
+        print(f"problem: {problem}")
 
 
 def run(argv: Optional[List[str]] = None) -> int:
@@ -83,31 +99,25 @@ def run(argv: Optional[List[str]] = None) -> int:
             if (target[key] or "") != value.strip():
                 raise MigrationRefused(f"{key} {target[key]!r} does not match --expected-{key} {value!r}")
 
-        info, matched = _inspect(url)
-        print(f"alembic_version={info['alembic_version']} export_events_exists={info['export_events_exists']} schema_reference={matched}")
-        print(f"row_counts={info['row_counts']}")
+        info, assessment = _inspect(url)
+        _report(info, assessment)
         if args.action == "status":
             return 0
         if not args.backup_verified:
             raise MigrationRefused("--backup-verified is required for stamp and upgrade")
-        if matched is None:
-            raise MigrationRefused("schema does not match a 0001_initial reference (run schema_preflight.py compare)")
-        if info["export_events_exists"]:
-            raise MigrationRefused("export_events already exists")
+        required = REQUIRED_STATE[args.action]
+        if assessment["state"] != required:
+            raise MigrationRefused(f"{args.action} requires state {required}, found {assessment['state']} ({assessment['verdict']})")
 
         from alembic import command
 
         if args.action == "stamp":
-            if info["alembic_version"] is not None:
-                raise MigrationRefused(f"database is already versioned ({info['alembic_version']}); do not stamp")
-            command.stamp(_alembic_config(url), BASE_REVISION)
+            command.stamp(_alembic_config(url), preflight.BASE_REVISION)
         else:
-            if info["alembic_version"] != [BASE_REVISION]:
-                raise MigrationRefused(f"upgrade requires alembic_version {BASE_REVISION}, found {info['alembic_version']}")
-            command.upgrade(_alembic_config(url), TARGET_REVISION)
+            command.upgrade(_alembic_config(url), preflight.TARGET_REVISION)
 
-        after, _matched = _inspect(url)
-        print(f"done: alembic_version={after['alembic_version']} export_events_exists={after['export_events_exists']}")
+        after_info, after = _inspect(url)
+        print(f"done: state={after['state']} {preflight.VERSION_TABLE}={after_info['zconnect_alembic_version']}")
         return 0
     except (MigrationRefused, preflight.PreflightError) as exc:
         print(f"REFUSED: {str(exc).rstrip('.')}. Nothing was changed.", file=sys.stderr)

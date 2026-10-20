@@ -1,4 +1,4 @@
-"""Tests for the append-only export_events audit table and migration 0002.
+"""Tests for the append-only zconnect_export_events audit table and migration 0002.
 
 Isolated SQLite files only (PostgreSQL variants live in test_postgres_concurrency.py).
 No production database or Zoho organisation is ever contacted.
@@ -281,7 +281,7 @@ def test_soft_reset_without_context_uses_default_tenant(service, db):
 
 def test_missing_export_events_table_fails_closed(tmp_path, zoho):
     engine = create_engine(f"sqlite:///{(tmp_path / 'no_events.db').as_posix()}", future=True)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
     service = StubbedExportService(None, zoho)
     try:
@@ -316,39 +316,39 @@ def test_migration_upgrade_and_downgrade_fresh_database(tmp_path, monkeypatch):
 
     engine = create_engine(url, future=True)
     inspector = inspect(engine)
-    assert "export_events" in inspector.get_table_names()
-    assert {ix["name"] for ix in inspector.get_indexes("export_events")} >= {
-        "ix_export_events_tenant_order",
-        "ix_export_events_tenant_created",
-        "ix_export_events_sync_run",
-        "ix_export_events_export_record",
+    assert "zconnect_export_events" in inspector.get_table_names()
+    assert {ix["name"] for ix in inspector.get_indexes("zconnect_export_events")} >= {
+        "ix_zconnect_export_events_tenant_order",
+        "ix_zconnect_export_events_tenant_created",
+        "ix_zconnect_export_events_sync_run",
+        "ix_zconnect_export_events_export_record",
     }
-    fks = {fk["referred_table"] for fk in inspector.get_foreign_keys("export_events")}
+    fks = {fk["referred_table"] for fk in inspector.get_foreign_keys("zconnect_export_events")}
     assert fks == {"exported_orders", "sync_runs"}
     with engine.begin() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0002_export_events"
+        assert conn.execute(text("SELECT version_num FROM zconnect_alembic_version")).scalar() == "0002_export_events"
         triggers = {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
-    assert triggers == {"export_events_no_update", "export_events_no_delete"}
+    assert triggers == {"zconnect_export_events_no_update", "zconnect_export_events_no_delete"}
     engine.dispose()
 
     command.downgrade(config, "0001_initial")
     engine = create_engine(url, future=True)
-    assert "export_events" not in inspect(engine).get_table_names()
+    assert "zconnect_export_events" not in inspect(engine).get_table_names()
     assert {"settings", "sync_runs", "exported_orders", "exported_invoices"} <= set(inspect(engine).get_table_names())
     engine.dispose()
 
     command.upgrade(config, "head")  # re-upgrade works after a downgrade
     engine = create_engine(url, future=True)
-    assert "export_events" in inspect(engine).get_table_names()
+    assert "zconnect_export_events" in inspect(engine).get_table_names()
     engine.dispose()
 
 
 def test_migration_on_production_like_database_preserves_existing_rows(tmp_path, monkeypatch):
-    """Production tables were created by create_all (no alembic_version). Plan: stamp
+    """Production tables were created by create_all (no zconnect_alembic_version). Plan: stamp
     0001_initial, then upgrade. Existing rows must be untouched both ways."""
     url = f"sqlite:///{(tmp_path / 'prodlike.db').as_posix()}"
     engine = create_engine(url, future=True)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO sync_runs (id, status, date_from, date_to, total_orders, total_customers, total_invoices) VALUES (1, 'success', '2026-09-01', '2026-09-01', 1, 1, 1)"))
         conn.execute(text("INSERT INTO exported_orders (id, sync_run_id, unify_order_id, customer_name, status, message) VALUES (1, 1, 'L-1', 'Customer', 'exported', 'Invoice ZINV-1 created')"))
@@ -365,7 +365,7 @@ def test_migration_on_production_like_database_preserves_existing_rows(tmp_path,
     command.stamp(config, "0001_initial")
     command.upgrade(config, "head")
     assert snapshot() == before
-    assert "export_events" in inspect(engine).get_table_names()
+    assert "zconnect_export_events" in inspect(engine).get_table_names()
     command.downgrade(config, "0001_initial")
     assert snapshot() == before
     engine.dispose()
@@ -379,14 +379,14 @@ def test_migrated_table_rejects_update_and_delete(tmp_path, monkeypatch):
     session.add(models.ExportEvent(tenant_id="t", unify_order_id="O-1", event_type="claimed", new_status="in_progress"))
     session.commit()
     with pytest.raises(DatabaseError, match="append-only"):
-        session.execute(text("UPDATE export_events SET event_type = 'tampered'"))
+        session.execute(text("UPDATE zconnect_export_events SET event_type = 'tampered'"))
         session.commit()
     session.rollback()
     with pytest.raises(DatabaseError, match="append-only"):
-        session.execute(text("DELETE FROM export_events"))
+        session.execute(text("DELETE FROM zconnect_export_events"))
         session.commit()
     session.rollback()
-    assert session.execute(text("SELECT event_type FROM export_events")).scalar() == "claimed"
+    assert session.execute(text("SELECT event_type FROM zconnect_export_events")).scalar() == "claimed"
     session.close()
     engine.dispose()
 
@@ -396,17 +396,125 @@ def test_model_matches_migration(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'compare.db').as_posix()}"
     command.upgrade(alembic_config(monkeypatch, url), "head")
     engine = create_engine(url, future=True)
-    migrated = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("export_events")}
+    migrated = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("zconnect_export_events")}
     engine.dispose()
     modelled = {c.name: c.nullable for c in models.ExportEvent.__table__.columns}
     assert migrated == modelled
 
 
 def test_app_startup_never_creates_migration_only_tables():
-    """Deploying code must not implicitly run the schema change: only migration 0002 creates export_events."""
+    """Deploying code must not implicitly run the schema change: only migration 0002 creates zconnect_export_events."""
     from app import db as app_db
     import app.main  # noqa: F401  (runs the startup create_all)
 
     tables = inspect(app_db.engine).get_table_names()
     assert "sync_runs" in tables and "exported_orders" in tables
-    assert "export_events" not in tables
+    assert "zconnect_export_events" not in tables
+
+
+# ---------------------------------------------------------------------------
+# Shared database: another application (e.g. ZRecipe) owns objects with generic names
+# ---------------------------------------------------------------------------
+
+FOREIGN_EXPORT_EVENTS_DDL = (
+    "CREATE TABLE export_events (id INTEGER PRIMARY KEY, tenant_id TEXT, recipe_id TEXT, kind TEXT, payload TEXT, "
+    "created_at TEXT, c7 TEXT, c8 TEXT, c9 TEXT, c10 TEXT, c11 TEXT, c12 TEXT, c13 TEXT)"
+)
+
+
+def shared_database(tmp_path, name: str):
+    """Zconnect's startup tables plus a foreign 13-column export_events (with an index and a
+    row) and a foreign alembic_version, as in the production Supabase project."""
+    from app.main import MIGRATION_ONLY_TABLES
+
+    url = f"sqlite:///{(tmp_path / name).as_posix()}"
+    engine = create_engine(url, future=True)
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in MIGRATION_ONLY_TABLES])
+    with engine.begin() as conn:
+        conn.execute(text(FOREIGN_EXPORT_EVENTS_DDL))
+        conn.execute(text("CREATE INDEX ix_foreign_kind ON export_events (kind)"))
+        conn.execute(text("INSERT INTO export_events (id, tenant_id, recipe_id, kind) VALUES (1, 'other-app', 'R-1', 'export')"))
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('other_app_0042')"))
+    return url, engine
+
+
+def foreign_objects(engine) -> dict:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        return {
+            "columns": [(c["name"], str(c["type"])) for c in inspector.get_columns("export_events")],
+            "indexes": sorted(ix["name"] for ix in inspector.get_indexes("export_events")),
+            "rows": [tuple(r) for r in conn.execute(text("SELECT * FROM export_events ORDER BY id"))],
+            "triggers": [r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'export_events'"))],
+            "alembic_version": [r[0] for r in conn.execute(text("SELECT version_num FROM alembic_version"))],
+        }
+
+
+def zconnect_version(engine):
+    with engine.begin() as conn:
+        if not inspect(conn).has_table("zconnect_alembic_version"):
+            return None
+        return [r[0] for r in conn.execute(text("SELECT version_num FROM zconnect_alembic_version"))]
+
+
+def test_migration_on_shared_database_never_touches_foreign_objects(tmp_path, monkeypatch):
+    url, engine = shared_database(tmp_path, "shared.db")
+    before = foreign_objects(engine)
+    assert len(before["columns"]) == 13
+
+    config = alembic_config(monkeypatch, url)
+    command.stamp(config, "0001_initial")
+    command.upgrade(config, "head")
+    assert zconnect_version(engine) == ["0002_export_events"]
+    assert "zconnect_export_events" in inspect(engine).get_table_names()
+    assert foreign_objects(engine) == before  # same columns, index, row, no triggers, foreign version kept
+
+    command.downgrade(config, "0001_initial")
+    assert zconnect_version(engine) == ["0001_initial"]
+    assert "zconnect_export_events" not in inspect(engine).get_table_names()
+    assert foreign_objects(engine) == before
+    engine.dispose()
+
+
+def test_sync_fails_closed_on_shared_database_before_migration(tmp_path, zoho):
+    """A foreign export_events table must never be mistaken for Zconnect's audit table."""
+    _url, engine = shared_database(tmp_path, "shared_unmigrated.db")
+    before = foreign_objects(engine)
+    assert not inspect(engine).has_table("zconnect_export_events")
+    session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
+    try:
+        result = asyncio.run(StubbedExportService(None, zoho).run_export(session, "2026-10-01", "2026-10-02", [make_order("O-1")]))
+    finally:
+        session.close()
+    assert details_by_id(result)["O-1"]["status"] == "failed"
+    assert zoho.create_calls == [] and zoho.lookup_calls == []
+    assert foreign_objects(engine) == before
+    engine.dispose()
+
+
+def test_audit_events_go_only_to_zconnect_table_on_shared_database(tmp_path, monkeypatch, zoho):
+    url, engine = shared_database(tmp_path, "shared_migrated.db")
+    config = alembic_config(monkeypatch, url)
+    command.stamp(config, "0001_initial")
+    command.upgrade(config, "head")
+    before = foreign_objects(engine)
+
+    service = StubbedExportService(None, zoho)
+    service.audit = AuditContext(tenant_id="tenant-a", actor_id="user-1")
+    session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
+    try:
+        result = asyncio.run(service.run_export(session, "2026-10-01", "2026-10-02", [make_order("O-1")]))
+        assert details_by_id(result)["O-1"]["status"] == "created"
+        assert [(e.event_type, e.new_status) for e in list_export_events(session, "tenant-a", "O-1")] == [
+            ("claimed", "in_progress"),
+            ("invoice_created", "exported"),
+        ]
+        with pytest.raises(DatabaseError, match="append-only"):
+            session.execute(text("UPDATE zconnect_export_events SET event_type = 'tampered'"))
+        session.rollback()
+    finally:
+        session.close()
+    assert zoho.create_calls == ["O-1"]
+    assert foreign_objects(engine) == before
+    engine.dispose()

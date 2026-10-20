@@ -7,6 +7,7 @@ from alembic import context
 
 from app.models import Base
 from app.config import settings
+from app.db import ALEMBIC_VERSION_TABLE
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -20,7 +21,7 @@ if config.config_file_name is not None:
 
 def run_migrations_offline():
     url = settings.normalized_database_url or config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
+    context.configure(url=url, target_metadata=target_metadata, literal_binds=True, version_table=ALEMBIC_VERSION_TABLE)
 
     with context.begin_transaction():
         context.run_migrations()
@@ -35,7 +36,7 @@ def run_migrations_online():
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata, version_table=ALEMBIC_VERSION_TABLE)
 
         with context.begin_transaction():
             context.run_migrations()

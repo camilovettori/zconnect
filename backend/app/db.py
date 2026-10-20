@@ -10,6 +10,10 @@ from .config import get_database_url_log_details, settings
 
 logger = logging.getLogger(__name__)
 
+# The production database is shared with other applications, so Zconnect's Alembic history
+# lives in its own version table instead of the generic alembic_version.
+ALEMBIC_VERSION_TABLE = "zconnect_alembic_version"
+
 normalized_database_url = settings.normalized_database_url
 try:
     database_url_details = get_database_url_log_details(normalized_database_url)

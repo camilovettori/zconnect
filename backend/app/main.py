@@ -11,19 +11,21 @@ from .api import routes
 from .security import configured_secrets
 
 # Tables managed only by Alembic migrations are never created implicitly at startup, so
-# deploying code cannot silently run a schema change. export_events comes from
+# deploying code cannot silently run a schema change. The audit table comes from
 # migration 0002_export_events.
-MIGRATION_ONLY_TABLES = {"export_events"}
+AUDIT_TABLE = models.ExportEvent.__tablename__
+MIGRATION_ONLY_TABLES = {AUDIT_TABLE}
 
 models.Base.metadata.create_all(
     bind=engine,
     tables=[table for table in models.Base.metadata.sorted_tables if table.name not in MIGRATION_ONLY_TABLES],
 )
 
-if not inspect(engine).has_table("export_events"):
+if not inspect(engine).has_table(AUDIT_TABLE):
     logging.getLogger(__name__).critical(
-        "export_events table is missing: run the approved migration 0002_export_events. "
-        "Invoice syncs and resets will fail closed until it exists."
+        "%s table is missing: run the approved migration 0002_export_events. "
+        "Invoice syncs and resets will fail closed until it exists.",
+        AUDIT_TABLE,
     )
 
 if not configured_secrets():
