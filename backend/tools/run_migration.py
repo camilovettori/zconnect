@@ -1,4 +1,4 @@
-"""Guarded runner for the 0002_export_events release migration.
+"""Guarded runner for explicit 0002_export_events / 0003_analytics release migrations.
 
 Wraps `alembic stamp 0001_initial` and `alembic upgrade 0002_export_events` with the checks
 the release runbook requires, so a typo or a stray .env cannot migrate the wrong database:
@@ -12,8 +12,9 @@ the release runbook requires, so a typo or a stray .env cannot migrate the wrong
       stamp   only in state ready_to_stamp   (no zconnect_alembic_version, no Zconnect audit objects,
                                               original tables matching a 0001_initial reference)
       upgrade only in state ready_to_upgrade (zconnect_alembic_version = 0001_initial)
-    upgrade targets 0002_export_events (not "head"), so later migrations are never applied by
-    accident. PostgreSQL runs the DDL in one transaction.
+    upgrade defaults to 0002_export_events, or explicitly --target 0003_analytics, never
+    "head". Analytics requires verified 0002, or the exact known legacy Analytics schema
+    plus explicit --repair-existing-analytics approval. PostgreSQL DDL is transactional.
   * Objects other applications may own in the shared database (public.export_events,
     public.alembic_version) are reported for information and never touched: Zconnect uses
     zconnect_export_events and zconnect_alembic_version.
@@ -85,11 +86,14 @@ def _report(info: Dict[str, Any], assessment: Dict[str, Any]) -> None:
 
 
 def run(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Guarded 0002_export_events migration runner.")
+    parser = argparse.ArgumentParser(description="Guarded explicit 0002 / 0003 migration runner.")
     parser.add_argument("--expected-host", required=True)
     parser.add_argument("--expected-database", required=True)
     parser.add_argument("--expected-user")
     parser.add_argument("--backup-verified", action="store_true", help="Confirms a restore-tested backup was taken just now")
+    parser.add_argument("--target", choices=[preflight.TARGET_REVISION, preflight.ANALYTICS_REVISION], default=preflight.TARGET_REVISION,
+                        help="Explicit upgrade revision; never head (default: 0002_export_events)")
+    parser.add_argument("--repair-existing-analytics", action="store_true", help="Explicit approval to harden the exact known pre-created Analytics schema during 0003")
     parser.add_argument("action", choices=["status", "stamp", "upgrade"])
     args = parser.parse_args(argv)
 
@@ -109,7 +113,11 @@ def run(argv: Optional[List[str]] = None) -> int:
             return 0
         if not args.backup_verified:
             raise MigrationRefused("--backup-verified is required for stamp and upgrade")
-        required = REQUIRED_STATE[args.action]
+        required = "migrated" if args.action == "upgrade" and args.target == preflight.ANALYTICS_REVISION else REQUIRED_STATE[args.action]
+        if args.action == "upgrade" and args.target == preflight.ANALYTICS_REVISION and assessment["state"] == "analytics_unversioned":
+            if not args.repair_existing_analytics:
+                raise MigrationRefused("--repair-existing-analytics is required; never stamp pre-created Analytics tables")
+            required = "analytics_unversioned"
         if assessment["state"] != required:
             raise MigrationRefused(f"{args.action} requires state {required}, found {assessment['state']} ({assessment['verdict']})")
 
@@ -118,10 +126,16 @@ def run(argv: Optional[List[str]] = None) -> int:
         if args.action == "stamp":
             command.stamp(_alembic_config(url), preflight.BASE_REVISION)
         else:
-            command.upgrade(_alembic_config(url), preflight.TARGET_REVISION)
+            config = _alembic_config(url)
+            if args.repair_existing_analytics:
+                config.set_main_option("zconnect.repair_existing_analytics", "true")
+            command.upgrade(config, args.target)
 
         after_info, after = _inspect(url)
         print(f"done: state={after['state']} {preflight.VERSION_TABLE}={after_info['zconnect_alembic_version']}")
+        if args.action == "upgrade" and args.target == preflight.ANALYTICS_REVISION and after["state"] != "analytics_migrated":
+            print("POST-UPGRADE VERIFICATION FAILED: migration ran; do not deploy or retry blindly.", file=sys.stderr)
+            return 2
         return 0
     except (MigrationRefused, preflight.PreflightError) as exc:
         print(f"REFUSED: {str(exc).rstrip('.')}. Nothing was changed.", file=sys.stderr)

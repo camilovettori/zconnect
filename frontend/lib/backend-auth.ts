@@ -13,13 +13,15 @@ import { fetchCurrentUser, refreshSession } from "./supabase";
 // The backend (app/security.py) rejects anything unsigned, tampered, replayed or expired.
 
 export const SESSION_COOKIE = "zconnect_session";
-const SIGNATURE_VERSION = "v2";
+const SIGNATURE_VERSION = "v3";
 const MIN_SECRET_LENGTH = 32;
+const COMPANY_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 // Headers the client must never be able to set on a backend request.
 const CLIENT_CONTROLLED_HEADERS = [
   "x-zconnect-user",
   "x-zconnect-role",
+  "x-zconnect-company",
   "x-zconnect-timestamp",
   "x-zconnect-signature",
   "x-zconnect-content-sha256",
@@ -28,7 +30,27 @@ const CLIENT_CONTROLLED_HEADERS = [
   "cookie",
 ];
 
-export type AuthenticatedUser = { id: string; role: "admin" | "user" };
+export type AuthenticatedUser = { id: string; role: "admin" | "user" | "platform_admin"; companyId: string };
+
+/**
+ * Company and role come only from Supabase app_metadata (writable with the service role, never
+ * by the user). Users without a company belong to this deployment's default company.
+ * A platform admin is an admin with app_metadata.platform_admin === true.
+ * Fails closed (null) when a company is set but malformed, or the default is misconfigured:
+ * such a user must never be treated as a member of the default company.
+ */
+export function backendIdentity(user: { id: unknown; role?: unknown; app_metadata?: Record<string, unknown> | null }): AuthenticatedUser | null {
+  const meta = user.app_metadata ?? {};
+  const assigned = meta.company_id !== undefined && meta.company_id !== null && meta.company_id !== "";
+  const raw = assigned ? meta.company_id : process.env.ZCONNECT_DEFAULT_COMPANY_ID || "default";
+  const companyId = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (!COMPANY_ID_PATTERN.test(companyId)) {
+    return null;
+  }
+  const admin = user.role === "admin";
+  const role = admin && meta.platform_admin === true ? "platform_admin" : admin ? "admin" : "user";
+  return { id: String(user.id), role, companyId };
+}
 
 export type AuthResult =
   | { ok: true; user: AuthenticatedUser; refreshedSessionCookie: string | null }
@@ -114,11 +136,12 @@ export async function authenticateRequest(request: Request): Promise<AuthResult>
   if (!user) {
     return { ok: false, response: jsonResponse(401, { detail: "Authentication required" }) };
   }
-  return {
-    ok: true,
-    user: { id: String(user.id), role: user.role === "admin" ? "admin" : "user" },
-    refreshedSessionCookie,
-  };
+  const identity = backendIdentity(user);
+  if (!identity) {
+    console.error("[Security] User has an invalid company assignment; refusing backend requests", { userId: String(user.id) });
+    return { ok: false, response: jsonResponse(403, { detail: "Your account is not assigned to a valid company. Contact your administrator." }) };
+  }
+  return { ok: true, user: identity, refreshedSessionCookie };
 }
 
 /**
@@ -143,9 +166,10 @@ export function applySignedIdentity(
   }
   const timestamp = String(Math.floor(Date.now() / 1000));
   const contentSha256 = createHash("sha256").update(body).digest("hex");
-  const message = [SIGNATURE_VERSION, method.toUpperCase(), backendPath, query, timestamp, user.id, user.role, contentSha256].join("\n");
+  const message = [SIGNATURE_VERSION, method.toUpperCase(), backendPath, query, timestamp, user.id, user.role, user.companyId, contentSha256].join("\n");
   headers.set("x-zconnect-user", user.id);
   headers.set("x-zconnect-role", user.role);
+  headers.set("x-zconnect-company", user.companyId);
   headers.set("x-zconnect-timestamp", timestamp);
   headers.set("x-zconnect-content-sha256", contentSha256);
   headers.set("x-zconnect-signature", createHmac("sha256", secret).update(message, "utf8").digest("hex"));

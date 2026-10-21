@@ -1,4 +1,4 @@
-"""Read-only schema preflight for the Zconnect PostgreSQL database (migration 0002).
+"""Read-only schema preflight for Zconnect PostgreSQL migrations 0002 and 0003.
 
 The production database is shared with other applications (ZRecipe), so Zconnect's own
 migration objects carry a zconnect_ prefix: the audit table zconnect_export_events (with
@@ -16,6 +16,8 @@ Answers, before any Alembic stamp or upgrade:
       ready_to_stamp    no Zconnect version table, no Zconnect audit objects
       ready_to_upgrade  version 0001_initial, no Zconnect audit objects
       migrated          version 0002_export_events and an audit table identical to the reference
+      analytics_unversioned  exact known pre-created Analytics schema at 0002; explicit repair needed
+      analytics_migrated     version 0003, exact tenant constraints, RLS and revoked API access
       incompatible      any other combination, or an audit table that differs from the reference
       schema_differs    the seven original tables match no reference
     Only the two ready states print "SCHEMA MATCHES".
@@ -55,12 +57,16 @@ AUDIT_TABLE = "zconnect_export_events"
 AUDIT_FUNCTION = "zconnect_export_events_append_only"
 BASE_REVISION = "0001_initial"
 TARGET_REVISION = "0002_export_events"
+ANALYTICS_REVISION = "0003_analytics"
+ANALYTICS_TABLES = ["zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines"]
+ANALYTICS_REFERENCE = REFERENCE_DIR / "zconnect_analytics.json"
+ANALYTICS_LEGACY_REFERENCE = REFERENCE_DIR / "zconnect_analytics_legacy.json"
 # Generic names other applications in the shared database may own. Informational only.
 FOREIGN_TABLES = ("export_events", "alembic_version")
 
 READY_STATES = ("ready_to_stamp", "ready_to_upgrade")
 # Every table Zconnect owns: none of them may be reachable by Supabase's API roles.
-ZCONNECT_TABLES = APP_TABLES + [AUDIT_TABLE, VERSION_TABLE]
+ZCONNECT_TABLES = APP_TABLES + [AUDIT_TABLE, VERSION_TABLE] + ANALYTICS_TABLES
 API_ROLES = ("anon", "authenticated")
 
 
@@ -105,28 +111,29 @@ def _exists(q, table: str) -> bool:
     return bool(q("select to_regclass(%s) is not null", f"public.{table}")[0][0])
 
 
-def audit_definition(conn: psycopg.Connection) -> Optional[Dict[str, List[list]]]:
+def audit_definition(conn: psycopg.Connection, table: str = AUDIT_TABLE) -> Optional[Dict[str, List[list]]]:
     """Full definition of zconnect_export_events (None if absent): compared exactly, never by counts."""
     q = _query(conn)
-    if not _exists(q, AUDIT_TABLE):
+    if not _exists(q, table):
         return None
+    precision_columns = ", numeric_precision, numeric_scale, datetime_precision" if table in ANALYTICS_TABLES else ""
     return {
         "columns": q(
-            """select column_name, data_type, character_maximum_length, is_nullable,
-                      regexp_replace(coalesce(column_default, ''), '::regclass', ''), is_identity
+            f"""select column_name, data_type, character_maximum_length, is_nullable,
+                      regexp_replace(coalesce(column_default, ''), '::regclass', ''), is_identity{precision_columns}
                from information_schema.columns
                where table_schema = 'public' and table_name = %s
                order by column_name""",
-            AUDIT_TABLE,
+            table,
         ),
         "constraints": q(
             "select conname, contype, pg_get_constraintdef(oid) from pg_constraint where conrelid = %s::regclass order by 1",
-            f"public.{AUDIT_TABLE}",
+            f"public.{table}",
         ),
-        "indexes": q("select indexname, indexdef from pg_indexes where schemaname = 'public' and tablename = %s order by 1", AUDIT_TABLE),
+        "indexes": q("select indexname, indexdef from pg_indexes where schemaname = 'public' and tablename = %s order by 1", table),
         "triggers": q(
             "select tgname, pg_get_triggerdef(oid) from pg_trigger where tgrelid = %s::regclass and not tgisinternal order by 1",
-            f"public.{AUDIT_TABLE}",
+            f"public.{table}",
         ),
     }
 
@@ -199,6 +206,29 @@ def snapshot(conn: psycopg.Connection) -> Tuple[Dict[str, List[list]], Dict[str,
         list(API_ROLES),
     )
     info["zconnect_tables_without_rls"] = [t for t in info["rls_disabled_tables"] if t in ZCONNECT_TABLES]
+    info["analytics_definitions"] = {t: audit_definition(conn, t) for t in ANALYTICS_TABLES}
+    info["analytics_policies"] = q("select tablename, policyname from pg_policies where schemaname='public' and tablename=any(%s) order by 1,2", ANALYTICS_TABLES)
+    # Include PUBLIC and inherited privileges, not just direct role grants.
+    info["analytics_api_access"] = q(
+        """select c.relname, r.rolname from pg_class c cross join pg_roles r
+           where c.relnamespace='public'::regnamespace and c.relname=any(%s)
+           and r.rolname in ('anon','authenticated')
+           and has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') order by 1,2""", ANALYTICS_TABLES)
+    info["analytics_public_grants"] = q(
+        """select c.relname, a.privilege_type from pg_class c
+           cross join lateral aclexplode(coalesce(c.relacl,acldefault(case when c.relkind='S' then 's'::"char" else 'r'::"char" end,c.relowner))) a
+           where c.relnamespace='public'::regnamespace and c.relname=any(%s) and a.grantee=0 order by 1,2""",
+        ANALYTICS_TABLES + ["zconnect_order_facts_id_seq", "zconnect_order_lines_id_seq"])
+    info["analytics_sequence_access"] = q(
+        """select c.relname,r.rolname from pg_class c cross join pg_roles r
+           where c.relnamespace='public'::regnamespace and c.relkind='S'
+           and c.relname=any(%s) and r.rolname in ('anon','authenticated')
+           and has_sequence_privilege(r.oid,c.oid,'USAGE,SELECT,UPDATE') order by 1,2""",
+        ["zconnect_order_facts_id_seq", "zconnect_order_lines_id_seq"])
+    info["analytics_row_counts"] = {t: q(f'select count(*) from public."{t}"')[0][0] for t in ANALYTICS_TABLES if _exists(q,t)}
+    info["analytics_default_company_exists"] = bool(q("select exists(select 1 from public.zconnect_companies where id='default')")[0][0]) if _exists(q, "zconnect_companies") else False
+    if _exists(q, AUDIT_TABLE):
+        info["audit_row_count"] = q(f'select count(*) from public."{AUDIT_TABLE}"')[0][0]
     if _exists(q, "settings"):
         # Names and a set/empty flag only; values are never selected.
         info["settings_keys"] = q("select key, coalesce(length(value), 0) > 0 from settings order by key")
@@ -224,6 +254,28 @@ def load_references(paths: Optional[List[str]] = None) -> Dict[str, Dict[str, Li
 
 def load_audit_reference() -> Dict[str, List[list]]:
     return _read_json(AUDIT_REFERENCE)["definition"]
+
+
+def analytics_differences(info: Dict[str, Any]) -> List[str]:
+    reference = _read_json(ANALYTICS_REFERENCE)["definitions"]
+    diffs = []
+    for table in ANALYTICS_TABLES:
+        diffs.extend(f"{table}: {d}" for d in audit_differences(info.get("analytics_definitions", {}).get(table), reference[table]))
+    if set(ANALYTICS_TABLES) & set(info.get("rls_disabled_tables", [])):
+        diffs.append("Analytics RLS is disabled")
+    for key in ("analytics_api_access", "analytics_public_grants", "analytics_sequence_access", "analytics_policies"):
+        if info.get(key):
+            diffs.append(f"Unsafe analytics access: {key}")
+    return diffs
+
+
+def legacy_analytics_matches(info: Dict[str, Any]) -> bool:
+    """Only the exact known pre-migration model schema is eligible for explicit repair."""
+    definitions = info.get("analytics_definitions", {})
+    if info.get("analytics_policies") or not all(definitions.get(t) for t in ANALYTICS_TABLES):
+        return False
+    reference = _read_json(ANALYTICS_LEGACY_REFERENCE)["definitions"]
+    return all(not audit_differences(definitions[t], reference[t]) for t in ANALYTICS_TABLES)
 
 
 def compare(schema: Dict[str, List[list]], references: Dict[str, Dict[str, List[list]]]) -> Tuple[Optional[str], Dict[str, List[str]]]:
@@ -260,25 +312,35 @@ def assess(matched: Optional[str], info: Dict[str, Any], audit_def: Optional[Dic
     version = info["zconnect_alembic_version"]
     table = info["zconnect_export_events_exists"]
     function = info["zconnect_append_only_function_exists"]
+    analytics_present = any(info.get("analytics_definitions", {}).values())
     problems: List[str] = []
     if matched is None:
         state = "schema_differs"
         problems.append("Zconnect's original tables match no 0001_initial reference")
-    elif version is None and not table and not function:
+    elif version is None and not table and not function and not analytics_present:
         state = "ready_to_stamp"
-    elif version == [BASE_REVISION] and not table and not function:
+    elif version == [BASE_REVISION] and not table and not function and not analytics_present:
         state = "ready_to_upgrade"
-    elif version == [TARGET_REVISION] and table and not audit_differences(audit_def, audit_reference):
+    elif version == [TARGET_REVISION] and table and function and not analytics_present and not audit_differences(audit_def, audit_reference):
         state = "migrated"
+    elif version == [TARGET_REVISION] and table and function and not audit_differences(audit_def, audit_reference) and legacy_analytics_matches(info):
+        state = "analytics_unversioned"
+        problems.append("Known pre-created Analytics tables require explicitly approved repair before 0003; do not stamp them")
+    elif version == [ANALYTICS_REVISION] and table and function and not audit_differences(audit_def, audit_reference) and not analytics_differences(info):
+        state = "analytics_migrated"
     else:
         state = "incompatible"
         problems.append(f"{VERSION_TABLE}={version}, {AUDIT_TABLE} exists={table}, {AUDIT_FUNCTION}() exists={function}")
         if table:
             problems += [f"{AUDIT_TABLE} {d}" for d in audit_differences(audit_def, audit_reference)]
+        if analytics_present or version == [ANALYTICS_REVISION]:
+            problems += analytics_differences(info)
     verdicts = {
         "ready_to_stamp": f"SCHEMA MATCHES 0001_initial ({matched}): unversioned, ready to stamp",
         "ready_to_upgrade": f"SCHEMA MATCHES 0001_initial ({matched}): at {BASE_REVISION}, ready to upgrade",
         "migrated": f"ALREADY MIGRATED to {TARGET_REVISION}: nothing to do",
+        "analytics_migrated": f"ALREADY MIGRATED to {ANALYTICS_REVISION}: Analytics schema and API protections verified",
+        "analytics_unversioned": "ANALYTICS REPAIR REQUIRED: known pre-created tables at 0002; explicit --repair-existing-analytics required",
         "incompatible": "INCOMPATIBLE ZCONNECT OBJECTS PRESENT: do NOT stamp or upgrade; stop and review",
         "schema_differs": "SCHEMA DIFFERS from every 0001_initial reference: do NOT stamp; stop and review",
     }
@@ -297,15 +359,23 @@ def postcheck(conn: psycopg.Connection, info: Dict[str, Any], pre_info: Dict[str
     """Checks after the upgrade to 0002_export_events; pre_info comes from a `dump` taken just before."""
     definition = audit_definition(conn)
     empty = definition is not None and conn.execute(f'select count(*) from public."{AUDIT_TABLE}"').fetchone()[0] == 0
-    return {
-        f"{VERSION_TABLE} is {TARGET_REVISION}": info["zconnect_alembic_version"] == [TARGET_REVISION],
+    analytics = info["zconnect_alembic_version"] == [ANALYTICS_REVISION]
+    checks = {
+        f"{VERSION_TABLE} is {ANALYTICS_REVISION if analytics else TARGET_REVISION}": info["zconnect_alembic_version"] == [ANALYTICS_REVISION if analytics else TARGET_REVISION],
         f"{AUDIT_TABLE} matches the bundled definition exactly (columns, constraints, indexes, append-only trigger)": definition is not None
         and not audit_differences(definition, load_audit_reference()),
-        f"{AUDIT_TABLE} is empty (no backfill)": empty,
+        f"{AUDIT_TABLE} has no migration backfill": (conn.execute(f'select count(*) from public."{AUDIT_TABLE}"').fetchone()[0] == pre_info["audit_row_count"]) if "audit_row_count" in pre_info else empty,
         "existing row counts unchanged": info["row_counts"] == pre_info.get("row_counts"),
         "exported_orders statuses unchanged": info.get("exported_orders_status") == pre_info.get("exported_orders_status"),
         "foreign objects (public.export_events, public.alembic_version) unchanged": info["foreign_objects"] == pre_info.get("foreign_objects"),
     }
+    if analytics:
+        checks["Analytics schema, tenant constraints, RLS and API privileges match"] = not analytics_differences(info)
+        expected_counts = pre_info.get("analytics_row_counts") or {t: int(t == "zconnect_companies") for t in ANALYTICS_TABLES}
+        if pre_info.get("analytics_row_counts") and not pre_info.get("analytics_default_company_exists", False):
+            expected_counts = {**expected_counts, "zconnect_companies": expected_counts["zconnect_companies"] + 1}
+        checks["Analytics rows preserved; default company exists"] = info.get("analytics_row_counts") == expected_counts and info.get("analytics_default_company_exists", False)
+    return checks
 
 
 def _print_foreign(info: Dict[str, Any]) -> None:
@@ -337,8 +407,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         with connect_read_only(url) as conn:
             if argv[0] == "postcheck":
                 _schema, info = snapshot(conn)
-                pre_info = _read_json(Path(argv[1]))["info"]
+                pre_document = _read_json(Path(argv[1]))
+                pre_info = pre_document["info"]
                 checks = postcheck(conn, info, pre_info)
+                checks["original seven-table schema unchanged"] = _schema == pre_document["schema"]
                 for name, ok in checks.items():
                     print(f"{'PASS' if ok else 'FAIL'}  {name}")
                 _print_exposure(info)  # new tables inherit default grants: protect them before go-live
@@ -368,7 +440,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for problem in assessment["problems"]:
         print(f"PROBLEM: {problem}")
     print(assessment["verdict"])
-    return 0 if assessment["state"] in READY_STATES + ("migrated",) else 1
+    return 0 if assessment["state"] in READY_STATES + ("migrated", "analytics_migrated") else 1
 
 
 if __name__ == "__main__":

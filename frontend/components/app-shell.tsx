@@ -10,6 +10,7 @@ import { BrandLogo } from "./brand-logo";
 const NAV_ITEMS = [
   { href: "/sync", label: "Sync", match: ["/sync"] },
   { href: "/history", label: "History", match: ["/history"] },
+  { href: "/analytics", label: "Analytics", match: ["/analytics"] },
   { href: "/settings", label: "Settings", match: ["/settings", "/connections", "/users"] },
 ];
 
@@ -118,7 +119,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               disabled={signingOut}
               className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-card transition-colors hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {signingOut ? "Signing outâ€¦" : "Logout"}
+              {signingOut ? "Signing out…" : "Logout"}
             </button>
           </div>
         </div>
@@ -141,7 +142,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="mx-auto flex max-w-7xl flex-col items-center gap-1 px-4 py-6 text-center text-xs text-slate-400 sm:flex-row sm:justify-between sm:px-6 sm:text-left lg:px-8">
           <div>
             <span className="font-medium text-slate-500">Developed by Ziffera</span>
-            <span className="mx-2 hidden sm:inline" aria-hidden="true">Â·</span>
+            <span className="mx-2 hidden sm:inline" aria-hidden="true">·</span>
             <span className="block sm:inline">Simple digital solutions for local businesses</span>
           </div>
           <a

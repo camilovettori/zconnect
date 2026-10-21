@@ -20,6 +20,7 @@ from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import sessionmaker
 
 from app import models
+from app.main import MIGRATION_ONLY_TABLES
 from app.api import routes
 from app.config import settings
 from app.db import Base, get_db
@@ -281,7 +282,7 @@ def test_soft_reset_without_context_uses_default_tenant(service, db):
 
 def test_missing_export_events_table_fails_closed(tmp_path, zoho):
     engine = create_engine(f"sqlite:///{(tmp_path / 'no_events.db').as_posix()}", future=True)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in MIGRATION_ONLY_TABLES])
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
     service = StubbedExportService(None, zoho)
     try:
@@ -312,7 +313,7 @@ def alembic_config(monkeypatch, url: str) -> Config:
 def test_migration_upgrade_and_downgrade_fresh_database(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'fresh.db').as_posix()}"
     config = alembic_config(monkeypatch, url)
-    command.upgrade(config, "head")
+    command.upgrade(config, "0002_export_events")
 
     engine = create_engine(url, future=True)
     inspector = inspect(engine)
@@ -337,7 +338,7 @@ def test_migration_upgrade_and_downgrade_fresh_database(tmp_path, monkeypatch):
     assert {"settings", "sync_runs", "exported_orders", "exported_invoices"} <= set(inspect(engine).get_table_names())
     engine.dispose()
 
-    command.upgrade(config, "head")  # re-upgrade works after a downgrade
+    command.upgrade(config, "0002_export_events")  # re-upgrade works after a downgrade
     engine = create_engine(url, future=True)
     assert "zconnect_export_events" in inspect(engine).get_table_names()
     engine.dispose()
@@ -348,7 +349,7 @@ def test_migration_on_production_like_database_preserves_existing_rows(tmp_path,
     0001_initial, then upgrade. Existing rows must be untouched both ways."""
     url = f"sqlite:///{(tmp_path / 'prodlike.db').as_posix()}"
     engine = create_engine(url, future=True)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in MIGRATION_ONLY_TABLES])
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO sync_runs (id, status, date_from, date_to, total_orders, total_customers, total_invoices) VALUES (1, 'success', '2026-09-01', '2026-09-01', 1, 1, 1)"))
         conn.execute(text("INSERT INTO exported_orders (id, sync_run_id, unify_order_id, customer_name, status, message) VALUES (1, 1, 'L-1', 'Customer', 'exported', 'Invoice ZINV-1 created')"))
@@ -363,7 +364,7 @@ def test_migration_on_production_like_database_preserves_existing_rows(tmp_path,
     before = snapshot()
     config = alembic_config(monkeypatch, url)
     command.stamp(config, "0001_initial")
-    command.upgrade(config, "head")
+    command.upgrade(config, "0002_export_events")
     assert snapshot() == before
     assert "zconnect_export_events" in inspect(engine).get_table_names()
     command.downgrade(config, "0001_initial")
@@ -373,7 +374,7 @@ def test_migration_on_production_like_database_preserves_existing_rows(tmp_path,
 
 def test_migrated_table_rejects_update_and_delete(tmp_path, monkeypatch):
     url = f"sqlite:///{(tmp_path / 'appendonly.db').as_posix()}"
-    command.upgrade(alembic_config(monkeypatch, url), "head")
+    command.upgrade(alembic_config(monkeypatch, url), "0002_export_events")
     engine = create_engine(url, future=True)
     session = sessionmaker(bind=engine, future=True)()
     session.add(models.ExportEvent(tenant_id="t", unify_order_id="O-1", event_type="claimed", new_status="in_progress"))
@@ -394,7 +395,7 @@ def test_migrated_table_rejects_update_and_delete(tmp_path, monkeypatch):
 def test_model_matches_migration(tmp_path, monkeypatch):
     """The ORM model and migration 0002 define the same columns."""
     url = f"sqlite:///{(tmp_path / 'compare.db').as_posix()}"
-    command.upgrade(alembic_config(monkeypatch, url), "head")
+    command.upgrade(alembic_config(monkeypatch, url), "0002_export_events")
     engine = create_engine(url, future=True)
     migrated = {c["name"]: c["nullable"] for c in inspect(engine).get_columns("zconnect_export_events")}
     engine.dispose()
@@ -465,7 +466,7 @@ def test_migration_on_shared_database_never_touches_foreign_objects(tmp_path, mo
 
     config = alembic_config(monkeypatch, url)
     command.stamp(config, "0001_initial")
-    command.upgrade(config, "head")
+    command.upgrade(config, "0002_export_events")
     assert zconnect_version(engine) == ["0002_export_events"]
     assert "zconnect_export_events" in inspect(engine).get_table_names()
     assert foreign_objects(engine) == before  # same columns, index, row, no triggers, foreign version kept
@@ -497,7 +498,7 @@ def test_audit_events_go_only_to_zconnect_table_on_shared_database(tmp_path, mon
     url, engine = shared_database(tmp_path, "shared_migrated.db")
     config = alembic_config(monkeypatch, url)
     command.stamp(config, "0001_initial")
-    command.upgrade(config, "head")
+    command.upgrade(config, "0002_export_events")
     before = foreign_objects(engine)
 
     service = StubbedExportService(None, zoho)

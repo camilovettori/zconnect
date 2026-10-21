@@ -4,11 +4,14 @@ The browser never talks to this API directly. The Next.js server validates the u
 Supabase session and forwards each request with a short-lived, HMAC-SHA256 signed identity:
 
     X-Zconnect-User       verified Supabase user id
-    X-Zconnect-Role       "admin" | "user" (Supabase app_metadata.role; only settable server-side)
+    X-Zconnect-Role       "admin" | "user" | "platform_admin" (Supabase app_metadata; only
+                          settable server-side). platform_admin is an admin who may also read
+                          other companies' analytics.
+    X-Zconnect-Company    the user's company id (Supabase app_metadata.company_id)
     X-Zconnect-Timestamp       unix seconds
     X-Zconnect-Content-SHA256  hex SHA-256 of the exact request body bytes (empty body included)
     X-Zconnect-Signature       hex HMAC-SHA256(secret,
-                               "v2\\nMETHOD\\nPATH\\nQUERY\\nTIMESTAMP\\nUSER\\nROLE\\nBODY_SHA256")
+                               "v3\\nMETHOD\\nPATH\\nQUERY\\nTIMESTAMP\\nUSER\\nROLE\\nCOMPANY\\nBODY_SHA256")
 
 The signature binds the identity to the method, path, query and body of this request, so it
 cannot be replayed against another endpoint or with another payload, and it expires after
@@ -21,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import List
@@ -31,13 +35,16 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-SIGNATURE_VERSION = "v2"
+SIGNATURE_VERSION = "v3"
 MAX_CLOCK_SKEW_SECONDS = 120
 MIN_SECRET_LENGTH = 32
-ROLES = ("admin", "user")
+ROLES = ("admin", "user", "platform_admin")
+ADMIN_ROLES = ("admin", "platform_admin")
+COMPANY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 USER_HEADER = "x-zconnect-user"
 ROLE_HEADER = "x-zconnect-role"
+COMPANY_HEADER = "x-zconnect-company"
 TIMESTAMP_HEADER = "x-zconnect-timestamp"
 CONTENT_SHA256_HEADER = "x-zconnect-content-sha256"
 SIGNATURE_HEADER = "x-zconnect-signature"
@@ -47,10 +54,15 @@ SIGNATURE_HEADER = "x-zconnect-signature"
 class Identity:
     user_id: str
     role: str
+    company_id: str = "default"
 
     @property
     def is_admin(self) -> bool:
-        return self.role == "admin"
+        return self.role in ADMIN_ROLES
+
+    @property
+    def is_platform_admin(self) -> bool:
+        return self.role == "platform_admin"
 
 
 def configured_secrets() -> List[bytes]:
@@ -76,9 +88,10 @@ def compute_signature(
     timestamp: str,
     user_id: str,
     role: str,
+    company_id: str,
     content_sha256: str,
 ) -> str:
-    message = "\n".join([SIGNATURE_VERSION, method.upper(), path, query, timestamp, user_id, role, content_sha256])
+    message = "\n".join([SIGNATURE_VERSION, method.upper(), path, query, timestamp, user_id, role, company_id, content_sha256])
     return hmac.new(secret, message.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -96,12 +109,13 @@ async def require_identity(request: Request) -> Identity:
 
     user_id = (request.headers.get(USER_HEADER) or "").strip()
     role = (request.headers.get(ROLE_HEADER) or "").strip()
+    company_id = (request.headers.get(COMPANY_HEADER) or "").strip()
     timestamp = (request.headers.get(TIMESTAMP_HEADER) or "").strip()
     signature = (request.headers.get(SIGNATURE_HEADER) or "").strip().lower()
     declared_digest = (request.headers.get(CONTENT_SHA256_HEADER) or "").strip().lower()
-    if not (user_id and role and timestamp and signature and declared_digest):
+    if not (user_id and role and company_id and timestamp and signature and declared_digest):
         raise _unauthorized("missing identity headers")
-    if role not in ROLES or len(user_id) > 128:
+    if role not in ROLES or len(user_id) > 128 or not COMPANY_ID_PATTERN.match(company_id):
         raise _unauthorized("invalid identity")
     try:
         issued_at = int(timestamp)
@@ -121,7 +135,7 @@ async def require_identity(request: Request) -> Identity:
     query = f"?{raw_query}" if raw_query else ""
     valid = any(
         hmac.compare_digest(
-            compute_signature(secret, request.method, path, query, timestamp, user_id, role, received_digest),
+            compute_signature(secret, request.method, path, query, timestamp, user_id, role, company_id, received_digest),
             signature,
         )
         for secret in secrets
@@ -129,7 +143,7 @@ async def require_identity(request: Request) -> Identity:
     if not valid:
         raise _unauthorized("bad signature")
 
-    identity = Identity(user_id=user_id, role=role)
+    identity = Identity(user_id=user_id, role=role, company_id=company_id)
     request.state.identity = identity
     return identity
 

@@ -68,7 +68,8 @@ def info(version=None, table=False, function=False, foreign=NO_FOREIGN):
 def test_zconnect_object_names_are_consistent():
     assert models.ExportEvent.__tablename__ == preflight.AUDIT_TABLE == "zconnect_export_events"
     assert ALEMBIC_VERSION_TABLE == preflight.VERSION_TABLE == "zconnect_alembic_version"
-    assert MIGRATION_ONLY_TABLES == {"zconnect_export_events"}
+    assert MIGRATION_ONLY_TABLES == {"zconnect_export_events", *models.ANALYTICS_TABLES}
+    assert all(name.startswith("zconnect_") for name in MIGRATION_ONLY_TABLES)
     reference = preflight.load_audit_reference()
     model_indexes = {ix.name for ix in models.ExportEvent.__table__.indexes}
     assert {row[0] for row in reference["indexes"]} == model_indexes | {"zconnect_export_events_pkey"}

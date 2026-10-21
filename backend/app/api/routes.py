@@ -5,13 +5,14 @@ import json
 import traceback
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from typing import Any, List
+from typing import Any, List, Optional
 
 from ..db import get_db
-from ..security import Identity, require_admin, require_identity
+from ..security import COMPANY_ID_PATTERN, Identity, require_admin, require_identity
 from .. import models
 from ..schemas import (
     ConnectionTestResult,
@@ -27,7 +28,7 @@ from ..schemas import (
     SettingsResponse,
 )
 from ..services.unify_service import UnifyService, make_unify_service, UnifyServiceError
-from ..services import csv_parser
+from ..services import analytics_service, csv_parser
 from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
 from ..services.export_service import (
     AuditContext,
@@ -815,6 +816,75 @@ async def run_export_csv(request: ExportCsvRunRequest, db: Session = Depends(get
         )
 
 
+# ---------------------------------------------------------------------------
+# Analytics (company-scoped; see services/analytics_service.py)
+# ---------------------------------------------------------------------------
+
+ANALYTICS_UNAVAILABLE = "Analytics is not available yet: the database needs migration 0003_analytics."
+
+
+def _analytics_company(identity: Identity, requested: Optional[str]) -> str:
+    """Everyone sees their own company. Only platform admins may choose another one."""
+    company_id = (requested or "").strip()
+    if not company_id or company_id == identity.company_id:
+        return identity.company_id
+    if not identity.is_platform_admin:
+        logger.warning("Rejected cross-company analytics request from user %s (company %s)", identity.user_id, identity.company_id)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only view your own company's analytics")
+    if not COMPANY_ID_PATTERN.match(company_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid company")
+    return company_id
+
+
+def _analytics_call(db: Session, fn):
+    try:
+        return fn()
+    except analytics_service.AnalyticsError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Analytics query failed: %s", exc.__class__.__name__)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=ANALYTICS_UNAVAILABLE) from exc
+
+
+@router.get("/analytics/summary")
+async def analytics_summary(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    granularity: Optional[str] = None,
+    customer: Optional[str] = None,
+    product: Optional[str] = None,
+    company_id: Optional[str] = None,
+    identity: Identity = Depends(require_identity),
+    db: Session = Depends(get_db),
+):
+    company = _analytics_company(identity, company_id)
+    return _analytics_call(
+        db,
+        lambda: analytics_service.compute_summary(
+            db, analytics_service.build_filters(company, date_from, date_to, granularity, customer, product)
+        ),
+    )
+
+
+@router.get("/analytics/filters")
+async def analytics_filters(company_id: Optional[str] = None, identity: Identity = Depends(require_identity), db: Session = Depends(get_db)):
+    company = _analytics_company(identity, company_id)
+    return _analytics_call(db, lambda: analytics_service.filter_options(db, company))
+
+
+@router.get("/analytics/companies")
+async def analytics_companies(identity: Identity = Depends(require_identity), db: Session = Depends(get_db)):
+    def load():
+        companies = analytics_service.list_companies(db)
+        if identity.is_platform_admin:
+            return {"companies": companies, "can_switch": True, "current": identity.company_id}
+        own = [c for c in companies if c["id"] == identity.company_id] or [{"id": identity.company_id, "name": identity.company_id}]
+        return {"companies": own, "can_switch": False, "current": identity.company_id}
+
+    return _analytics_call(db, load)
+
+
 @router.get("/export/history", response_model=List[dict])
 async def export_history(db: Session = Depends(get_db)):
     runs = db.query(models.SyncRun).order_by(models.SyncRun.started_at.desc()).all()
@@ -961,7 +1031,8 @@ def _audit_context(db: Session, http_request: Request | None) -> AuditContext:
     tenant_id = (configured.get("TENANT_ID") or configured.get("ZOHO_ORG_ID") or "default")[:64]
     identity = getattr(getattr(http_request, "state", None), "identity", None)
     actor_id = identity.user_id[:128] if isinstance(identity, Identity) else None
-    return AuditContext(tenant_id=tenant_id, actor_id=actor_id)
+    company_id = identity.company_id if isinstance(identity, Identity) else models.DEFAULT_COMPANY_ID
+    return AuditContext(tenant_id=tenant_id, actor_id=actor_id, company_id=company_id)
 
 
 def _export_record_counts(db: Session) -> dict:

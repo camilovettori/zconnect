@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import BigInteger, Column, Integer, String, DateTime, Text, ForeignKey, Index, UniqueConstraint, JSON, func
+from sqlalchemy import BigInteger, Column, Date, Integer, Numeric, String, DateTime, Text, ForeignKey, ForeignKeyConstraint, Index, UniqueConstraint, JSON, func
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -132,3 +132,91 @@ class ExportEvent(Base):
         Index("ix_zconnect_export_events_sync_run", "sync_run_id"),
         Index("ix_zconnect_export_events_export_record", "export_record_id"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Analytics (migration 0003_analytics). Company-scoped; the seven original tables are
+# unchanged: a sync run's company is recorded in zconnect_sync_run_companies, and runs
+# without a row (all runs before Analytics) belong to the default company.
+# ---------------------------------------------------------------------------
+
+DEFAULT_COMPANY_ID = "default"
+
+
+class Company(Base):
+    __tablename__ = "zconnect_companies"
+
+    id = Column(String(64), primary_key=True)
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, server_default=func.now())
+
+
+class SyncRunCompany(Base):
+    __tablename__ = "zconnect_sync_run_companies"
+
+    sync_run_id = Column(Integer, ForeignKey("sync_runs.id", ondelete="CASCADE"), primary_key=True)
+    company_id = Column(String(64), ForeignKey("zconnect_companies.id", ondelete="RESTRICT"), nullable=False)
+
+    __table_args__ = (
+        Index("ix_zconnect_sync_run_companies_company", "company_id"),
+        UniqueConstraint("sync_run_id", "company_id", name="uq_zconnect_run_company"),
+    )
+
+
+class OrderFact(Base):
+    """Value of one invoiced order, captured from the exact line items sent to Zoho.
+
+    It is the net (pre-tax) value of a DRAFT invoice: an invoiced amount, not paid revenue.
+    One row per company and Unify order; orders invoiced before Analytics have no row."""
+
+    __tablename__ = "zconnect_order_facts"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    company_id = Column(String(64), ForeignKey("zconnect_companies.id", ondelete="RESTRICT"), nullable=False)
+    unify_order_id = Column(String(128), nullable=False)
+    sync_run_id = Column(Integer, ForeignKey("sync_runs.id", ondelete="RESTRICT"), nullable=True)
+    zoho_invoice_id = Column(String(128), nullable=True)
+    customer_key = Column(String(255), nullable=False)
+    customer_name = Column(String(255), nullable=True)
+    order_date = Column(Date, nullable=True)
+    delivery_date = Column(Date, nullable=True)
+    invoice_date = Column(Date, nullable=False)
+    currency = Column(String(3), nullable=False)
+    net_amount = Column(Numeric(14, 2), nullable=False)
+    line_count = Column(Integer, nullable=False)
+    source = Column(String(32), nullable=False)  # invoice_created | invoice_linked
+    captured_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, server_default=func.now())
+
+    lines = relationship("OrderLineFact", back_populates="order", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "unify_order_id", name="uq_zconnect_order_facts_company_order"),
+        UniqueConstraint("id", "company_id", name="uq_zconnect_fact_company"),
+        ForeignKeyConstraint(["sync_run_id", "company_id"], ["zconnect_sync_run_companies.sync_run_id", "zconnect_sync_run_companies.company_id"], name="fk_zconnect_fact_run_company", ondelete="RESTRICT"),
+        Index("ix_zconnect_order_facts_company_date", "company_id", "invoice_date"),
+        Index("ix_zconnect_order_facts_company_customer", "company_id", "customer_key"),
+    )
+
+
+class OrderLineFact(Base):
+    __tablename__ = "zconnect_order_lines"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    order_fact_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=False)
+    company_id = Column(String(64), nullable=False)
+    product_key = Column(String(255), nullable=False)
+    product_name = Column(String(255), nullable=False)
+    quantity = Column(Numeric(14, 3), nullable=False)
+    unit_price = Column(Numeric(14, 4), nullable=False)
+    net_amount = Column(Numeric(14, 2), nullable=False)
+
+    order = relationship("OrderFact", back_populates="lines")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["order_fact_id", "company_id"], ["zconnect_order_facts.id", "zconnect_order_facts.company_id"], name="fk_zconnect_line_fact_company", ondelete="CASCADE"),
+        Index("ix_zconnect_order_lines_order", "order_fact_id"),
+        Index("ix_zconnect_order_lines_company_product", "company_id", "product_key"),
+    )
+
+
+ANALYTICS_TABLES = ("zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines")

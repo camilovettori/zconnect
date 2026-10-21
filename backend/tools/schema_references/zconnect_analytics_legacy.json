@@ -1,0 +1,439 @@
+{
+  "purpose": "Exact known pre-created model schema; repair requires explicit operator approval",
+  "definitions": {
+    "zconnect_companies": {
+      "columns": [
+        [
+          "created_at",
+          "timestamp with time zone",
+          null,
+          "NO",
+          "now()",
+          "NO",
+          null,
+          null,
+          6
+        ],
+        [
+          "id",
+          "character varying",
+          64,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "name",
+          "character varying",
+          255,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ]
+      ],
+      "constraints": [
+        [
+          "zconnect_companies_pkey",
+          "p",
+          "PRIMARY KEY (id)"
+        ]
+      ],
+      "indexes": [
+        [
+          "zconnect_companies_pkey",
+          "CREATE UNIQUE INDEX zconnect_companies_pkey ON public.zconnect_companies USING btree (id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "zconnect_sync_run_companies": {
+      "columns": [
+        [
+          "company_id",
+          "character varying",
+          64,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "sync_run_id",
+          "integer",
+          null,
+          "NO",
+          "",
+          "NO",
+          32,
+          0,
+          null
+        ]
+      ],
+      "constraints": [
+        [
+          "zconnect_sync_run_companies_company_id_fkey",
+          "f",
+          "FOREIGN KEY (company_id) REFERENCES zconnect_companies(id) ON DELETE RESTRICT"
+        ],
+        [
+          "zconnect_sync_run_companies_pkey",
+          "p",
+          "PRIMARY KEY (sync_run_id)"
+        ],
+        [
+          "zconnect_sync_run_companies_sync_run_id_fkey",
+          "f",
+          "FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE"
+        ]
+      ],
+      "indexes": [
+        [
+          "ix_zconnect_sync_run_companies_company",
+          "CREATE INDEX ix_zconnect_sync_run_companies_company ON public.zconnect_sync_run_companies USING btree (company_id)"
+        ],
+        [
+          "zconnect_sync_run_companies_pkey",
+          "CREATE UNIQUE INDEX zconnect_sync_run_companies_pkey ON public.zconnect_sync_run_companies USING btree (sync_run_id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "zconnect_order_facts": {
+      "columns": [
+        [
+          "captured_at",
+          "timestamp with time zone",
+          null,
+          "NO",
+          "now()",
+          "NO",
+          null,
+          null,
+          6
+        ],
+        [
+          "company_id",
+          "character varying",
+          64,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "currency",
+          "character varying",
+          3,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "customer_key",
+          "character varying",
+          255,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "customer_name",
+          "character varying",
+          255,
+          "YES",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "delivery_date",
+          "date",
+          null,
+          "YES",
+          "",
+          "NO",
+          null,
+          null,
+          0
+        ],
+        [
+          "id",
+          "bigint",
+          null,
+          "NO",
+          "nextval('zconnect_order_facts_id_seq')",
+          "NO",
+          64,
+          0,
+          null
+        ],
+        [
+          "invoice_date",
+          "date",
+          null,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          0
+        ],
+        [
+          "line_count",
+          "integer",
+          null,
+          "NO",
+          "",
+          "NO",
+          32,
+          0,
+          null
+        ],
+        [
+          "net_amount",
+          "numeric",
+          null,
+          "NO",
+          "",
+          "NO",
+          14,
+          2,
+          null
+        ],
+        [
+          "order_date",
+          "date",
+          null,
+          "YES",
+          "",
+          "NO",
+          null,
+          null,
+          0
+        ],
+        [
+          "source",
+          "character varying",
+          32,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "sync_run_id",
+          "integer",
+          null,
+          "YES",
+          "",
+          "NO",
+          32,
+          0,
+          null
+        ],
+        [
+          "unify_order_id",
+          "character varying",
+          128,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "zoho_invoice_id",
+          "character varying",
+          128,
+          "YES",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ]
+      ],
+      "constraints": [
+        [
+          "uq_zconnect_order_facts_company_order",
+          "u",
+          "UNIQUE (company_id, unify_order_id)"
+        ],
+        [
+          "zconnect_order_facts_company_id_fkey",
+          "f",
+          "FOREIGN KEY (company_id) REFERENCES zconnect_companies(id) ON DELETE RESTRICT"
+        ],
+        [
+          "zconnect_order_facts_pkey",
+          "p",
+          "PRIMARY KEY (id)"
+        ],
+        [
+          "zconnect_order_facts_sync_run_id_fkey",
+          "f",
+          "FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id) ON DELETE RESTRICT"
+        ]
+      ],
+      "indexes": [
+        [
+          "ix_zconnect_order_facts_company_customer",
+          "CREATE INDEX ix_zconnect_order_facts_company_customer ON public.zconnect_order_facts USING btree (company_id, customer_key)"
+        ],
+        [
+          "ix_zconnect_order_facts_company_date",
+          "CREATE INDEX ix_zconnect_order_facts_company_date ON public.zconnect_order_facts USING btree (company_id, invoice_date)"
+        ],
+        [
+          "uq_zconnect_order_facts_company_order",
+          "CREATE UNIQUE INDEX uq_zconnect_order_facts_company_order ON public.zconnect_order_facts USING btree (company_id, unify_order_id)"
+        ],
+        [
+          "zconnect_order_facts_pkey",
+          "CREATE UNIQUE INDEX zconnect_order_facts_pkey ON public.zconnect_order_facts USING btree (id)"
+        ]
+      ],
+      "triggers": []
+    },
+    "zconnect_order_lines": {
+      "columns": [
+        [
+          "company_id",
+          "character varying",
+          64,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "id",
+          "bigint",
+          null,
+          "NO",
+          "nextval('zconnect_order_lines_id_seq')",
+          "NO",
+          64,
+          0,
+          null
+        ],
+        [
+          "net_amount",
+          "numeric",
+          null,
+          "NO",
+          "",
+          "NO",
+          14,
+          2,
+          null
+        ],
+        [
+          "order_fact_id",
+          "bigint",
+          null,
+          "NO",
+          "",
+          "NO",
+          64,
+          0,
+          null
+        ],
+        [
+          "product_key",
+          "character varying",
+          255,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "product_name",
+          "character varying",
+          255,
+          "NO",
+          "",
+          "NO",
+          null,
+          null,
+          null
+        ],
+        [
+          "quantity",
+          "numeric",
+          null,
+          "NO",
+          "",
+          "NO",
+          14,
+          3,
+          null
+        ],
+        [
+          "unit_price",
+          "numeric",
+          null,
+          "NO",
+          "",
+          "NO",
+          14,
+          4,
+          null
+        ]
+      ],
+      "constraints": [
+        [
+          "zconnect_order_lines_order_fact_id_fkey",
+          "f",
+          "FOREIGN KEY (order_fact_id) REFERENCES zconnect_order_facts(id) ON DELETE CASCADE"
+        ],
+        [
+          "zconnect_order_lines_pkey",
+          "p",
+          "PRIMARY KEY (id)"
+        ]
+      ],
+      "indexes": [
+        [
+          "ix_zconnect_order_lines_company_product",
+          "CREATE INDEX ix_zconnect_order_lines_company_product ON public.zconnect_order_lines USING btree (company_id, product_key)"
+        ],
+        [
+          "ix_zconnect_order_lines_order",
+          "CREATE INDEX ix_zconnect_order_lines_order ON public.zconnect_order_lines USING btree (order_fact_id)"
+        ],
+        [
+          "zconnect_order_lines_pkey",
+          "CREATE UNIQUE INDEX zconnect_order_lines_pkey ON public.zconnect_order_lines USING btree (id)"
+        ]
+      ],
+      "triggers": []
+    }
+  }
+}

@@ -3,7 +3,8 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -17,6 +18,68 @@ from ..schemas import UnifyOrder
 
 class ExportServiceError(Exception):
     pass
+
+
+# Analytics stores invoiced values in the currency the rest of the app displays (EUR); the
+# Zoho organisation's currency is not stored anywhere else.
+ANALYTICS_CURRENCY = "EUR"
+DELIVERY_PRODUCT_KEY = "delivery-charge"
+_CENT = Decimal("0.01")
+
+
+def parse_iso_date(value: Any) -> Optional[date]:
+    text = str(value or "").strip()[:10]
+    try:
+        return date.fromisoformat(text) if text else None
+    except ValueError:
+        return None
+
+
+def _decimal(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value if value is not None else 0))
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+
+
+def delivery_line_flags(order: Any, line_items: List[Dict[str, Any]]) -> Optional[List[bool]]:
+    """Which payload lines are delivery charges. The payload builder emits one line per order line
+    with a positive quantity and a valid price, in order, plus an optional synthetic "Delivery
+    charge" line; when the counts do not line up, returns None (name matching is used instead)."""
+    kept = [getattr(line, "line_type", None) == "delivery" for line in getattr(order, "lines", None) or [] if (line.quantity or 0) > 0 and line.price is not None and line.price >= 0]
+    if len(line_items) == len(kept):
+        return kept
+    if len(line_items) == len(kept) + 1 and str(line_items[-1].get("name", "")).lower() == "delivery charge":
+        return kept + [True]
+    return None
+
+
+def analytics_lines(line_items: List[Dict[str, Any]], company_id: str, delivery_flags: Optional[List[bool]] = None) -> List["models.OrderLineFact"]:
+    """Order line facts from the exact Zoho payload lines: net value = quantity x rate (pre-tax).
+    Delivery charges get one shared key so they never appear as a product."""
+    lines = []
+    for index, item in enumerate(line_items):
+        name = str(item.get("name") or item.get("description") or "Unnamed item").strip() or "Unnamed item"
+        is_delivery = delivery_flags[index] if delivery_flags is not None and index < len(delivery_flags) else False
+        if is_delivery or name.lower() == "delivery charge":
+            key = DELIVERY_PRODUCT_KEY
+        elif item.get("item_id"):
+            key = f"zoho:{item['item_id']}"
+        else:
+            key = "name:" + re.sub(r"\s+", " ", name.casefold())
+        quantity = _decimal(item.get("quantity"))
+        unit_price = _decimal(item.get("rate"))
+        lines.append(
+            models.OrderLineFact(
+                company_id=company_id,
+                product_key=key[:255],
+                product_name=name[:255],
+                quantity=quantity,
+                unit_price=unit_price,
+                net_amount=(quantity * unit_price).quantize(_CENT, rounding=ROUND_HALF_UP),
+            )
+        )
+    return lines
 
 
 logger = logging.getLogger(__name__)
@@ -63,10 +126,12 @@ def latest_audit_time(message: Optional[str]) -> Optional[datetime]:
 @dataclass
 class AuditContext:
     """Who/where an export event belongs to. tenant_id isolates event history per company
-    (this deployment is single-tenant; see report). actor_id is the signed-in user when known."""
+    (this deployment is single-tenant; see report). actor_id is the signed-in user when known.
+    company_id is the signed-in user's company: it owns the sync run and its captured values."""
 
     tenant_id: str = "default"
     actor_id: Optional[str] = None
+    company_id: str = models.DEFAULT_COMPANY_ID
 
 
 _SECRET_RE = re.compile(
@@ -1355,6 +1420,67 @@ class ExportService:
             )
         )
 
+    def _record_run_company(self, db: Session, sync_run_id: int) -> None:
+        """Legacy default-company runs remain compatible; other ownership fails closed."""
+        try:
+            db.add(models.SyncRunCompany(sync_run_id=sync_run_id, company_id=self.audit.company_id))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Analytics: company of sync run %s not recorded (%s)", sync_run_id, exc.__class__.__name__)
+            if self.audit.company_id != models.DEFAULT_COMPANY_ID:
+                # No orders have been processed yet. Do not expose this unowned run
+                # through the legacy/default-company analytics fallback.
+                db.query(models.SyncRun).filter(models.SyncRun.id == sync_run_id).delete()
+                db.commit()
+                raise ExportServiceError("Cannot establish the company's sync run ownership; no invoices were requested") from exc
+
+    def _capture_order_value(
+        self,
+        db: Session,
+        *,
+        sync_run_id: int,
+        order: UnifyOrder,
+        line_items: List[Dict[str, Any]],
+        invoice_id: str,
+        invoice_date: Optional[str],
+        customer_key: str,
+        customer_name: str,
+        source: str,
+    ) -> None:
+        """Best effort, after the export record is committed: store the value of the lines that
+        were invoiced (the exact Zoho payload lines), for Analytics. A failure is logged and
+        never changes the order's sync outcome. Existing values are never overwritten."""
+        company_id = self.audit.company_id
+        try:
+            exists = db.execute(
+                select(models.OrderFact.id).where(models.OrderFact.company_id == company_id, models.OrderFact.unify_order_id == order.order_id)
+            ).first()
+            if exists:
+                return
+            lines = analytics_lines(line_items, company_id, delivery_line_flags(order, line_items))
+            fact = models.OrderFact(
+                company_id=company_id,
+                unify_order_id=order.order_id,
+                sync_run_id=sync_run_id,
+                zoho_invoice_id=invoice_id,
+                customer_key=(customer_key or customer_name or "unknown")[:255],
+                customer_name=(customer_name or None) and customer_name[:255],
+                order_date=parse_iso_date(order.order_date),
+                delivery_date=parse_iso_date(getattr(order, "delivery_date", None)),
+                invoice_date=parse_iso_date(invoice_date) or parse_iso_date(order.order_date) or datetime.now(timezone.utc).date(),
+                currency=ANALYTICS_CURRENCY,
+                net_amount=sum((line.net_amount for line in lines), Decimal("0.00")),
+                line_count=len(lines),
+                source=source,
+                lines=lines,
+            )
+            db.add(fact)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning("Analytics: value of order %s not captured (%s)", order.order_id, exc.__class__.__name__)
+
     def _record_skip_if_absent(self, db: Session, sync_run_id: int, order_id: str, customer_name: str, reason: str) -> None:
         if self._get_export_record(db, order_id) is not None:
             return
@@ -1583,6 +1709,17 @@ class ExportService:
                     "zoho_invoice_id": existing_invoice_id,
                     "message": f"Existing Zoho invoice {existing_invoice_id} found but the export record changed concurrently; check History",
                 }, "needs_verification"
+            self._capture_order_value(
+                db,
+                sync_run_id=sync_run_id,
+                order=order,
+                line_items=line_items,
+                invoice_id=existing_invoice_id,
+                invoice_date=invoice_date or order.order_date,
+                customer_key=buyer_key,
+                customer_name=record_customer,
+                source="invoice_linked",
+            )
             return {
                 "order_id": order_id,
                 "status": "already_exported",
@@ -1653,6 +1790,17 @@ class ExportService:
             detail["zoho_invoice_id"] = invoice_id
             return detail, "needs_verification"
 
+        self._capture_order_value(
+            db,
+            sync_run_id=sync_run_id,
+            order=order,
+            line_items=line_items,
+            invoice_id=invoice_id,
+            invoice_date=invoice_date or order.order_date,
+            customer_key=buyer_key,
+            customer_name=record_customer,
+            source="invoice_created",
+        )
         return {
             "order_id": order_id,
             "status": "created",
@@ -1834,6 +1982,7 @@ class ExportService:
         db.add(sync_run)
         db.commit()
         db.refresh(sync_run)
+        self._record_run_company(db, sync_run.id)
 
         error_messages: List[str] = []
         structured = {"created": 0, "skipped": 0, "failed": 0, "needs_verification": 0, "details": []}

@@ -12,9 +12,9 @@ from .security import configured_secrets
 
 # Tables managed only by Alembic migrations are never created implicitly at startup, so
 # deploying code cannot silently run a schema change. The audit table comes from
-# migration 0002_export_events.
+# migration 0002_export_events, the Analytics tables from 0003_analytics.
 AUDIT_TABLE = models.ExportEvent.__tablename__
-MIGRATION_ONLY_TABLES = {AUDIT_TABLE}
+MIGRATION_ONLY_TABLES = {AUDIT_TABLE, *models.ANALYTICS_TABLES}
 
 models.Base.metadata.create_all(
     bind=engine,

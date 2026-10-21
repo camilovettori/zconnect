@@ -21,6 +21,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app import models
+from app.main import MIGRATION_ONLY_TABLES
 from app.api import routes
 from app.db import Base
 from app.services.export_service import ReconcileError, soft_reset_export_records
@@ -272,7 +273,7 @@ def test_postgres_migration_upgrade_downgrade_and_append_only(pg_factory, monkey
     engine = pg_factory.kw["bind"]
     # Production-like start: tables from create_all (no zconnect_export_events, no zconnect_alembic_version), with data.
     Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name != "zconnect_export_events"])
+    Base.metadata.create_all(bind=engine, tables=[t for t in Base.metadata.sorted_tables if t.name not in MIGRATION_ONLY_TABLES])
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO sync_runs (id, status, date_from, date_to, total_orders, total_customers, total_invoices) VALUES (1, 'success', '2026-09-01', '2026-09-01', 1, 1, 1)"))
         conn.execute(text("INSERT INTO exported_orders (id, sync_run_id, unify_order_id, customer_name, status, message) VALUES (1, 1, 'L-1', 'Customer', 'exported', 'Invoice ZINV-1 created')"))
