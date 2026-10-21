@@ -1798,6 +1798,24 @@ class ExportService:
             "message": message,
         }
 
+    @staticmethod
+    def _final_run_status(*, created: int, failed: int, not_exported: int) -> str:
+        """Run status from per-order outcomes.
+
+        failed counts failed and needs_verification orders; not_exported counts orders skipped
+        because their preview status was not eligible. Orders that were already exported (or
+        linked to an existing Zoho invoice) are a correct outcome and never count as problems.
+        - success: new invoices were created and nothing failed or was left out
+        - partial: some invoices were created, but some orders failed or were left out
+        - failed:  orders failed or need verification and no invoice was created
+        - skipped: nothing to do (every order was already exported, or not eligible)
+        """
+        if failed:
+            return "partial" if created else "failed"
+        if not_exported:
+            return "partial" if created else "skipped"
+        return "success" if created else "skipped"
+
     async def run_export(
         self,
         db: Session,
@@ -1824,6 +1842,7 @@ class ExportService:
         successful_orders = 0
         failed_orders = 0
         skipped_orders = 0
+        already_exported_orders = 0  # already invoiced or linked to an existing Zoho invoice: correct, not a problem
         sync_run_finalized = False
         run_error: BaseException | None = None
         selected_order_ids = [order.order_id for order in orders]
@@ -1868,6 +1887,8 @@ class ExportService:
                 elif outcome == "skipped":
                     skipped_orders += 1
                     structured["skipped"] += 1
+                    if detail.get("status") == "already_exported":
+                        already_exported_orders += 1
                 else:
                     failed_orders += 1
                     structured["failed"] += 1
@@ -1878,15 +1899,11 @@ class ExportService:
             stage = "finalizing_success"
             sync_run.finished_at = datetime.utcnow()
             sync_run.total_invoices = total_invoices
-            if sync_run.total_invoices <= 0:
-                final_status = "failed"
-            elif failed_orders == 0 and skipped_orders == 0 and successful_orders > 0:
-                final_status = "success"
-            elif successful_orders > 0:
-                final_status = "partial"
-            else:
-                final_status = "failed"
-            sync_run.status = final_status
+            sync_run.status = self._final_run_status(
+                created=successful_orders,
+                failed=failed_orders,
+                not_exported=skipped_orders - already_exported_orders,
+            )
             sync_run.errors = "\n".join(error_messages) if error_messages else None
             db.commit()
             sync_run_finalized = True

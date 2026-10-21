@@ -837,17 +837,82 @@ async def export_history(db: Session = Depends(get_db)):
     return history
 
 
+# Outcome a sync run itself recorded for an order, from its processing events (status shown,
+# summary). Later admin actions (reset, reconcile) are not part of the run's outcome.
+_RUN_OUTCOME_EVENTS = {
+    "invoice_created": ("exported", "Draft invoice created in this run."),
+    "invoice_linked": ("exported", "Existing Zoho invoice linked in this run; no new invoice created."),
+    "failed": ("failed", "Failed in this run."),
+    "needs_verification": ("needs_verification", "Outcome unknown in this run; check Zoho before retrying."),
+    "stale_attempt_rejected": ("needs_verification", "This run's outcome was not applied because the record changed concurrently."),
+    "skipped": ("skipped", "Not exported in this run (preview status)."),
+    "sync_blocked": ("skipped", "Not processed in this run."),
+    "sync_error": ("failed", "Unexpected error in this run."),
+    "claimed": ("in_progress", "Claimed in this run; no final outcome was recorded."),
+}
+
+
+def _run_order_outcomes(db: Session, run_id: int) -> dict:
+    """Last processing event per order in this run (runs before the audit trail have none)."""
+    outcomes: dict = {}
+    events = (
+        db.query(models.ExportEvent)
+        .filter(models.ExportEvent.sync_run_id == run_id, models.ExportEvent.event_type.in_(list(_RUN_OUTCOME_EVENTS)))
+        .order_by(models.ExportEvent.id)
+        .all()
+    )
+    for event in events:
+        outcomes[event.unify_order_id] = event
+    return outcomes
+
+
+def _history_order_entry(order_id: str, record, event) -> dict:
+    """One order line of a run's history: this run's own outcome when the audit trail recorded
+    it, otherwise (older runs) the export record as stored."""
+    if event is None:
+        return {
+            "unify_order_id": order_id,
+            "customer_name": record.customer_name,
+            "status": record.status,
+            "message": record.message,
+            "created_at": record.created_at,
+        }
+    status, summary = _RUN_OUTCOME_EVENTS[event.event_type]
+    parts = [summary]
+    if event.zoho_invoice_id:
+        parts.append(f"Zoho invoice {event.zoho_invoice_id}.")
+    if event.detail and event.event_type not in ("invoice_created", "invoice_linked"):
+        parts.append(event.detail)
+    if record is not None and record.status != status:
+        parts.append(f"Current status: {record.status}.")
+    return {
+        "unify_order_id": order_id,
+        "customer_name": record.customer_name if record is not None else None,
+        "status": status,
+        "message": " ".join(parts),
+        "created_at": event.created_at,
+    }
+
+
 @router.get("/export/history/{id}")
 async def export_history_detail(id: int, db: Session = Depends(get_db)):
     run = db.query(models.SyncRun).filter(models.SyncRun.id == id).one_or_none()
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    orders = (
+    records = (
         db.query(models.ExportedOrder)
         .filter(models.ExportedOrder.sync_run_id == id)
         .all()
     )
+    outcomes = _run_order_outcomes(db, id)
+    orders = [_history_order_entry(r.unify_order_id, r, outcomes.get(r.unify_order_id)) for r in records]
+    # Orders this run processed whose export record was first created by an earlier run (retries).
+    listed = {r.unify_order_id for r in records}
+    for order_id, event in outcomes.items():
+        if order_id not in listed:
+            record = db.query(models.ExportedOrder).filter(models.ExportedOrder.unify_order_id == order_id).one_or_none()
+            orders.append(_history_order_entry(order_id, record, event))
     invoices = (
         db.query(models.ExportedInvoice)
         .filter(models.ExportedInvoice.sync_run_id == id)
@@ -867,16 +932,7 @@ async def export_history_detail(id: int, db: Session = Depends(get_db)):
             "total_invoices": run.total_invoices,
             "errors": run.errors,
         },
-        "orders": [
-            {
-                "unify_order_id": o.unify_order_id,
-                "customer_name": o.customer_name,
-                "status": o.status,
-                "message": o.message,
-                "created_at": o.created_at,
-            }
-            for o in orders
-        ],
+        "orders": orders,
         "invoices": [
             {
                 "unify_customer_name": i.unify_customer_name,

@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { AppShell } from "../../components/app-shell";
 import { useAppSession } from "../../components/app-session";
 import { Modal } from "../../components/ui/modal";
+import { Notice } from "../../components/ui/notice";
 import { PageHeader } from "../../components/ui/page-header";
 import { StatusBadge } from "../../components/ui/status-badge";
 import type { StatusTone } from "../../components/ui/status-badge";
@@ -41,7 +42,7 @@ type HistoryDetail = {
   }>;
 };
 
-type Notice = {
+type HistoryNotice = {
   kind: "success" | "error";
   text: string;
 };
@@ -260,7 +261,7 @@ export default function HistoryPage() {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedRunIds, setSelectedRunIds] = useState<Set<number>>(new Set());
-  const [notice, setNotice] = useState<Notice | null>(null);
+  const [notice, setNotice] = useState<HistoryNotice | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [pendingResetRunIds, setPendingResetRunIds] = useState<number[]>([]);
@@ -475,15 +476,9 @@ export default function HistoryPage() {
         />
 
         {notice && (
-          <div
-            role={notice.kind === "error" ? "alert" : "status"}
-            className={[
-              "rounded-xl border px-4 py-3 text-sm",
-              notice.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-700",
-            ].join(" ")}
-          >
+          <Notice kind={notice.kind} onDismiss={() => setNotice(null)}>
             {notice.text}
-          </div>
+          </Notice>
         )}
 
         <div className="grid gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)] xl:items-start">
