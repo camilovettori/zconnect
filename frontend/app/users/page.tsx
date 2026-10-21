@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { AppShell } from "../../components/app-shell";
 import { useAppSession } from "../../components/app-session";
+import { Modal } from "../../components/ui/modal";
+import { Notice } from "../../components/ui/notice";
+import { PageHeader } from "../../components/ui/page-header";
+import { BUTTON_DANGER, BUTTON_DANGER_SOLID, BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT, LABEL } from "../../components/ui/styles";
 
 type UserRow = {
   id: string;
@@ -14,37 +17,31 @@ type UserRow = {
   last_name?: string;
 };
 
-function Modal({
-  open,
-  title,
-  onClose,
-  children,
-}: {
-  open: boolean;
-  title: string;
-  onClose: () => void;
-  children: ReactNode;
-}) {
-  if (!open) {
-    return null;
-  }
+type Message = { kind: "success" | "error"; text: string };
 
+const dateFormatter = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" });
+
+function fullName(row: UserRow) {
+  return [row.first_name, row.last_name].map((part) => (part || "").trim()).filter(Boolean).join(" ");
+}
+
+function formatCreated(value: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : dateFormatter.format(date);
+}
+
+function RoleBadge({ role }: { role: string }) {
+  const admin = role === "admin";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-[0_30px_80px_-24px_rgba(15,23,42,0.5)]">
-        <div className="flex items-start justify-between gap-4">
-          <h3 className="text-xl font-semibold tracking-tight text-slate-950">{title}</h3>
-          <button
-            type="button"
-            className="rounded-full border border-slate-200 bg-white px-3 py-1 text-sm font-medium text-slate-500 transition hover:border-slate-300 hover:text-slate-700"
-            onClick={onClose}
-          >
-            Close
-          </button>
-        </div>
-        <div className="mt-4">{children}</div>
-      </div>
-    </div>
+    <span
+      className={[
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+        admin ? "border-brand-200 bg-brand-50 text-brand-800" : "border-slate-200 bg-slate-50 text-slate-600",
+      ].join(" ")}
+    >
+      {admin ? "Admin" : "User"}
+    </span>
   );
 }
 
@@ -52,8 +49,7 @@ export default function UsersPage() {
   const { user, loading } = useAppSession();
   const [users, setUsers] = useState<UserRow[]>([]);
   const [busy, setBusy] = useState(true);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [message, setMessage] = useState<Message | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -61,33 +57,35 @@ export default function UsersPage() {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<UserRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const isAdmin = user?.role === "admin";
 
   const loadUsers = async () => {
     setBusy(true);
-    setError("");
     try {
       const response = await fetch("/api/users", { cache: "no-store" });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(payload?.error || "Failed to load users");
+        throw new Error(payload?.error || "Unable to load users.");
       }
       const nextUsers = Array.isArray(payload?.users)
         ? payload.users
-            .filter((user: Partial<UserRow> | null | undefined) => Boolean(user && user.id))
-              .map((user: Partial<UserRow>) => ({
-              id: String(user.id || ""),
-              email: String(user.email || ""),
-              role: String(user.role || "user"),
-              created_at: user.created_at ? String(user.created_at) : null,
-              first_name: String(user.first_name || ""),
-              last_name: String(user.last_name || ""),
+            .filter((row: Partial<UserRow> | null | undefined) => Boolean(row && row.id))
+            .map((row: Partial<UserRow>) => ({
+              id: String(row.id || ""),
+              email: String(row.email || ""),
+              role: String(row.role || "user"),
+              created_at: row.created_at ? String(row.created_at) : null,
+              first_name: String(row.first_name || ""),
+              last_name: String(row.last_name || ""),
             }))
         : [];
       setUsers(nextUsers);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load users");
+      setMessage({ kind: "error", text: err instanceof Error ? err.message : "Unable to load users." });
     } finally {
       setBusy(false);
     }
@@ -96,20 +94,33 @@ export default function UsersPage() {
   useEffect(() => {
     if (!loading && isAdmin) {
       loadUsers().catch(() => undefined);
-    } else if (!loading && !isAdmin) {
+    } else if (!loading) {
       setBusy(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, isAdmin]);
 
-  const userCount = useMemo(() => users.length, [users]);
+  const resetForm = () => {
+    setEmail("");
+    setPassword("");
+    setRole("user");
+    setFirstName("");
+    setLastName("");
+    setFormError("");
+  };
 
-  const createUser = async () => {
+  const openCreate = () => {
+    resetForm();
+    setCreateOpen(true);
+  };
+
+  const createUser = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (saving) {
       return;
     }
     setSaving(true);
-    setError("");
-    setSuccess("");
+    setFormError("");
     try {
       const response = await fetch("/api/users", {
         method: "POST",
@@ -118,188 +129,233 @@ export default function UsersPage() {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        throw new Error(payload?.error || "Failed to create user");
+        throw new Error(payload?.error || "Unable to create the user.");
       }
-      const createdUser = payload?.user;
-      const createdEmail = String(createdUser?.email || email || "");
+      const createdEmail = String(payload?.user?.email || email || "");
       setCreateOpen(false);
-      setEmail("");
-      setPassword("");
-      setRole("user");
-      setFirstName("");
-      setLastName("");
-      setSuccess(createdEmail ? `User ${createdEmail} created successfully` : "User created successfully");
+      resetForm();
+      setMessage({ kind: "success", text: createdEmail ? `${createdEmail} can now sign in.` : "User created." });
       await loadUsers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create user");
+      setFormError(err instanceof Error ? err.message : "Unable to create the user.");
     } finally {
       setSaving(false);
     }
   };
 
-  const deleteUser = async (id: string, emailLabel: string) => {
-    if (!window.confirm(`Delete ${emailLabel}?`)) {
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) {
       return;
     }
-    setError("");
-    setSuccess("");
-    const response = await fetch(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      setError(payload?.error || "Failed to delete user");
-      return;
+    const target = pendingDelete;
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(target.id)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Unable to delete the user.");
+      }
+      setMessage({ kind: "success", text: `${target.email} was removed and can no longer sign in.` });
+      await loadUsers();
+    } catch (err) {
+      setMessage({ kind: "error", text: err instanceof Error ? err.message : "Unable to delete the user." });
+    } finally {
+      setDeleting(false);
+      setPendingDelete(null);
     }
-    setSuccess(`User ${emailLabel} deleted`);
-    await loadUsers();
+  };
+
+  const deleteButton = (row: UserRow) => {
+    const self = row.id === user?.id;
+    return (
+      <button
+        type="button"
+        onClick={() => setPendingDelete(row)}
+        disabled={self}
+        title={self ? "You can't remove your own account" : undefined}
+        className={BUTTON_DANGER}
+      >
+        Remove
+      </button>
+    );
   };
 
   return (
     <AppShell>
-      <main className="space-y-8">
-        <section className="rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)] backdrop-blur">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Users</p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950">Admin user management</h2>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">
-                Create login access for operators and keep the workspace simple.
-              </p>
-            </div>
-            <button
-              onClick={() => setCreateOpen(true)}
-              className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-900"
-            >
-              Add User
-            </button>
+      <main className="space-y-6">
+        <PageHeader
+          eyebrow="Settings"
+          title="Users"
+          description="People who can sign in to Zconnect. Admins can change connections, reset sync runs and manage users."
+          actions={
+            isAdmin ? (
+              <button type="button" onClick={openCreate} className={BUTTON_PRIMARY}>
+                Add user
+              </button>
+            ) : null
+          }
+        />
+
+        {message && (
+          <Notice kind={message.kind} onDismiss={() => setMessage(null)}>
+            {message.text}
+          </Notice>
+        )}
+
+        {loading ? (
+          <div className={`${CARD} space-y-3 p-5`} aria-label="Loading">
+            {[1, 2, 3].map((item) => (
+              <div key={item} className="h-12 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />
+            ))}
           </div>
-        </section>
-
-        {error ? <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
-        {success ? <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{success}</div> : null}
-
-        {!isAdmin ? (
-          <section className="rounded-3xl border border-slate-200/80 bg-white p-8 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
-            <h3 className="text-lg font-semibold text-slate-950">Access restricted</h3>
-            <p className="mt-2 text-sm text-slate-600">Only admin users can manage app logins.</p>
+        ) : !isAdmin ? (
+          <section className={`${CARD} p-6 sm:p-8`}>
+            <h2 className="text-base font-semibold text-slate-950">Admin access required</h2>
+            <p className="mt-1 text-sm text-slate-600">Only admins can view and manage who can sign in. Ask an admin if you need access for someone.</p>
           </section>
         ) : (
-          <section className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)]">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-semibold tracking-tight text-slate-950">Existing users</h3>
-                <p className="text-sm text-slate-600">{busy ? "Loading users..." : `${userCount} user${userCount === 1 ? "" : "s"}`}</p>
-              </div>
+          <section aria-labelledby="users-heading" className={CARD}>
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200/80 px-4 py-3.5 sm:px-5">
+              <h2 id="users-heading" className="text-base font-semibold tracking-tight text-slate-950">
+                People with access
+                {!busy && <span className="ml-2 text-sm font-normal tabular-nums text-slate-500">{users.length}</span>}
+              </h2>
             </div>
 
-            <div className="overflow-hidden rounded-2xl border border-slate-200">
-              <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
-                <thead className="bg-slate-50 text-slate-500">
-                  <tr>
-                    <th className="px-4 py-3 font-medium">Email</th>
-                    <th className="px-4 py-3 font-medium">Role</th>
-                    <th className="px-4 py-3 font-medium">Created</th>
-                    <th className="px-4 py-3 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 bg-white">
-                  {busy ? (
-                    <tr>
-                      <td className="px-4 py-6 text-slate-500" colSpan={4}>Loading users...</td>
-                    </tr>
-                  ) : users.length ? (
-                    users.map((row) => (
-                      <tr key={row.id}>
-                        <td className="px-4 py-4 font-medium text-slate-950">{row.email}</td>
-                        <td className="px-4 py-4 text-slate-600">{row.role}</td>
-                        <td className="px-4 py-4 text-slate-600">{row.created_at ? new Date(row.created_at).toLocaleString() : "—"}</td>
-                        <td className="px-4 py-4">
-                          <button
-                            onClick={() => deleteUser(row.id, row.email)}
-                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                          >
-                            Delete
-                          </button>
-                        </td>
+            {busy ? (
+              <div className="space-y-3 p-4 sm:p-5" aria-label="Loading users">
+                {[1, 2, 3].map((item) => (
+                  <div key={item} className="h-12 animate-pulse rounded-xl bg-slate-100 motion-reduce:animate-none" />
+                ))}
+              </div>
+            ) : users.length === 0 ? (
+              <div className="p-8 text-center">
+                <p className="text-sm font-medium text-slate-900">No users yet</p>
+                <p className="mt-1 text-sm text-slate-500">Add the first operator to give them access.</p>
+              </div>
+            ) : (
+              <>
+                <div className="hidden overflow-x-auto md:block">
+                  <table className="w-full text-left text-sm">
+                    <caption className="sr-only">Users</caption>
+                    <thead className="border-b border-slate-200 bg-slate-50/70 text-xs text-slate-500">
+                      <tr>
+                        <th scope="col" className="px-5 py-2.5 font-medium">Name</th>
+                        <th scope="col" className="px-5 py-2.5 font-medium">Email</th>
+                        <th scope="col" className="px-5 py-2.5 font-medium">Role</th>
+                        <th scope="col" className="px-5 py-2.5 font-medium">Added</th>
+                        <th scope="col" className="px-5 py-2.5 text-right font-medium">
+                          <span className="sr-only">Actions</span>
+                        </th>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td className="px-4 py-6 text-slate-500" colSpan={4}>No users yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {users.map((row) => (
+                        <tr key={row.id} className="hover:bg-slate-50/60">
+                          <td className="px-5 py-3 font-medium text-slate-900">
+                            {fullName(row) || <span className="font-normal text-slate-400">No name</span>}
+                            {row.id === user?.id && <span className="ml-2 text-xs font-normal text-slate-500">(you)</span>}
+                          </td>
+                          <td className="break-all px-5 py-3 text-slate-600">{row.email}</td>
+                          <td className="px-5 py-3"><RoleBadge role={row.role} /></td>
+                          <td className="whitespace-nowrap px-5 py-3 tabular-nums text-slate-600">{formatCreated(row.created_at)}</td>
+                          <td className="px-5 py-3 text-right">{deleteButton(row)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <ul className="divide-y divide-slate-100 md:hidden">
+                  {users.map((row) => (
+                    <li key={row.id} className="flex items-start justify-between gap-3 px-4 py-3.5">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-slate-900">
+                          {fullName(row) || row.email}
+                          {row.id === user?.id && <span className="ml-1.5 text-xs font-normal text-slate-500">(you)</span>}
+                        </p>
+                        {fullName(row) && <p className="truncate text-sm text-slate-600">{row.email}</p>}
+                        <div className="mt-1.5 flex items-center gap-2 text-xs text-slate-500">
+                          <RoleBadge role={row.role} />
+                          <span>Added {formatCreated(row.created_at)}</span>
+                        </div>
+                      </div>
+                      {deleteButton(row)}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </section>
         )}
 
-        <Modal open={createOpen} title="Add User" onClose={() => setCreateOpen(false)}>
-          <div className="space-y-4">
+        <Modal open={createOpen} title="Add user" onClose={saving ? undefined : () => setCreateOpen(false)}>
+          <form onSubmit={createUser} className="space-y-4 pt-1">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className={LABEL}>First name</span>
+                <input type="text" value={firstName} onChange={(event) => setFirstName(event.target.value)} className={INPUT} autoComplete="off" />
+              </label>
+              <label className="block">
+                <span className={LABEL}>Last name</span>
+                <input type="text" value={lastName} onChange={(event) => setLastName(event.target.value)} className={INPUT} autoComplete="off" />
+              </label>
+            </div>
             <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-700">Email</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
-              />
+              <span className={LABEL}>Email</span>
+              <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} className={INPUT} autoComplete="off" />
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-700">First Name</span>
-              <input
-                type="text"
-                value={firstName}
-                onChange={(event) => setFirstName(event.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
-              />
-            </label>
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-700">Last Name</span>
-              <input
-                type="text"
-                value={lastName}
-                onChange={(event) => setLastName(event.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
-              />
-            </label>
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-700">Password</span>
+              <span className={LABEL}>Temporary password</span>
               <input
                 type="password"
+                required
+                minLength={6}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
+                className={INPUT}
+                autoComplete="new-password"
               />
+              <span className="mt-1.5 block text-xs text-slate-500">At least 6 characters. Share it with the person securely.</span>
             </label>
             <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-700">Role</span>
-              <select
-                value={role}
-                onChange={(event) => setRole(event.target.value)}
-                className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100"
-              >
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
+              <span className={LABEL}>Role</span>
+              <select value={role} onChange={(event) => setRole(event.target.value)} className={INPUT}>
+                <option value="user">User — sync orders and view history</option>
+                <option value="admin">Admin — also manage connections, resets and users</option>
               </select>
             </label>
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => setCreateOpen(false)}
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-              >
+            {formError && <Notice kind="error">{formError}</Notice>}
+            <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
+              <button type="button" onClick={() => setCreateOpen(false)} disabled={saving} className={BUTTON_SECONDARY}>
                 Cancel
               </button>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={createUser}
-                className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {saving ? "Creating..." : "Create User"}
+              <button type="submit" disabled={saving} className={BUTTON_PRIMARY}>
+                {saving ? "Adding…" : "Add user"}
               </button>
             </div>
-          </div>
+          </form>
+        </Modal>
+
+        <Modal
+          open={pendingDelete !== null}
+          title="Remove this user?"
+          onClose={deleting ? undefined : () => setPendingDelete(null)}
+          actions={
+            <>
+              <button type="button" onClick={() => setPendingDelete(null)} disabled={deleting} className={BUTTON_SECONDARY}>
+                Cancel
+              </button>
+              <button type="button" onClick={confirmDelete} disabled={deleting} className={BUTTON_DANGER_SOLID}>
+                {deleting ? "Removing…" : "Remove user"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            <span className="font-medium text-slate-900">{pendingDelete?.email}</span> will no longer be able to sign in. Their past sync
+            runs and audit history are kept.
+          </p>
         </Modal>
       </main>
     </AppShell>

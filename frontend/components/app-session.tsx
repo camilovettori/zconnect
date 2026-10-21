@@ -7,10 +7,8 @@ type SessionUser = {
   id: string;
   email: string;
   role: string;
-  user_metadata?: {
-    first_name?: string;
-    last_name?: string;
-  };
+  // Supabase user_metadata: first_name / last_name, or full_name / name (see lib/user-display).
+  user_metadata?: Record<string, unknown>;
 };
 
 type SessionState = {
@@ -36,7 +34,7 @@ async function loadSession() {
       id: String((user as { id?: unknown }).id || ""),
       email: String((user as { email?: unknown }).email || ""),
       role: String((user as { role?: unknown }).role || "user"),
-      user_metadata: (user as { user_metadata?: { first_name?: string; last_name?: string } }).user_metadata || {},
+      user_metadata: ((user as { user_metadata?: Record<string, unknown> }).user_metadata as Record<string, unknown>) || {},
     } satisfies SessionUser;
   } catch {
     return null;

@@ -47,7 +47,9 @@ export function Modal({
         return;
       }
       const focusable = Array.from(
-        panel.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
       );
       if (focusable.length === 0) {
         event.preventDefault();
@@ -87,7 +89,7 @@ export function Modal({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-overlay focus:outline-none"
+        className="max-h-[calc(100dvh-3rem)] w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-overlay focus:outline-none sm:p-6"
       >
         <div className="flex items-start justify-between gap-4">
           <h2 id={titleId} className="text-lg font-semibold tracking-tight text-slate-950">

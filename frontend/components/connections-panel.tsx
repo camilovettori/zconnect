@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppSession } from "./app-session";
+import { Notice } from "./ui/notice";
+import { PageHeader } from "./ui/page-header";
+import { BUTTON_PRIMARY, BUTTON_SECONDARY, CARD, INPUT } from "./ui/styles";
 
 type SettingsState = {
   ZOHO_BASE_URL: string;
@@ -51,13 +54,11 @@ const SECRET_FIELDS = new Set<FieldKey>([
 const FIELD_SECTIONS: Array<{
   title: string;
   description: string;
-  accent: string;
   fields: FieldConfig[];
 }> = [
   {
     title: "Unify",
     description: "Credentials used to read orders and buyers from Unify.",
-    accent: "from-emerald-500/20 via-emerald-500/5 to-transparent",
     fields: [
       {
         key: "UNIFY_CLIENT_ID",
@@ -78,7 +79,6 @@ const FIELD_SECTIONS: Array<{
   {
     title: "Zoho",
     description: "Credentials used to create and manage Zoho Invoice drafts.",
-    accent: "from-sky-500/20 via-sky-500/5 to-transparent",
     fields: [
       {
         key: "ZOHO_BASE_URL",
@@ -218,19 +218,6 @@ function ShieldCheckIcon({ className = "h-5 w-5" }: { className?: string }) {
   );
 }
 
-function SparkIcon({ className = "h-5 w-5" }: { className?: string }) {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 20 20" fill="none" className={className}>
-      <path
-        d="M10 2.5l1.4 4.1 4.1 1.4-4.1 1.4-1.4 4.1-1.4-4.1-4.1-1.4 4.1-1.4L10 2.5Z"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 export function ConnectionsPanel() {
   // Display only: the backend enforces admin permission for saving and testing connections.
   const { user } = useAppSession();
@@ -242,6 +229,7 @@ export function ConnectionsPanel() {
   const [message, setMessage] = useState<string>("");
   const [messageKind, setMessageKind] = useState<ToastKind>("success");
   const [isSaving, setIsSaving] = useState(false);
+  const [testing, setTesting] = useState<"unify" | "zoho" | null>(null);
   const messageTimer = useRef<number | null>(null);
 
   const storedCount = useMemo(
@@ -302,7 +290,8 @@ export function ConnectionsPanel() {
   }, []);
 
   useEffect(() => {
-    if (!message) {
+    // Confirmations disappear on their own; errors stay until dismissed or replaced.
+    if (!message || messageKind === "error") {
       return;
     }
 
@@ -312,14 +301,14 @@ export function ConnectionsPanel() {
 
     messageTimer.current = window.setTimeout(() => {
       setMessage("");
-    }, 3500);
+    }, 5000);
 
     return () => {
       if (messageTimer.current) {
         window.clearTimeout(messageTimer.current);
       }
     };
-  }, [message]);
+  }, [message, messageKind]);
 
   const showToast = (text: string, kind: ToastKind = "success") => {
     setMessageKind(kind);
@@ -421,103 +410,90 @@ export function ConnectionsPanel() {
     }
   };
 
-  const testUnify = async () => {
-    const res = await fetch("/api/settings/unify/test", { method: "POST" });
-    const data = await res.json();
-    showToast(`Unify test: ${data.message}`, res.ok ? "success" : "error");
+  // The backend answers a failed test with HTTP 200 and ok=false, so both must be checked.
+  const testConnection = async (target: "unify" | "zoho") => {
+    if (testing) {
+      return;
+    }
+    const label = target === "unify" ? "Unify" : "Zoho";
+    setTesting(target);
+    try {
+      const res = await fetch(`/api/settings/${target}/test`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      const passed = res.ok && data?.ok === true;
+      const detail = String(data?.message || data?.detail || data?.error || (res.ok ? "" : `HTTP ${res.status}`)).trim();
+      showToast(
+        passed ? `${label} connection works.` : `${label} connection failed${detail ? `: ${detail}` : "."}`,
+        passed ? "success" : "error",
+      );
+    } catch {
+      showToast(`The ${label} connection test could not be completed. Check your network and try again.`, "error");
+    } finally {
+      setTesting(null);
+    }
   };
 
-  const testZoho = async () => {
-    const res = await fetch("/api/settings/zoho/test", { method: "POST" });
-    const data = await res.json();
-    showToast(`Zoho test: ${data.message}`, res.ok ? "success" : "error");
-  };
+  const noticeKind = messageKind === "neutral" ? "info" : messageKind;
+  const secretTotal = Object.keys(EMPTY_FLAGS).length;
+  const statusLine = !isAdmin
+    ? "Only admins can change or test connections."
+    : !settingsLoaded
+      ? "Loading settings…"
+      : isSaving
+        ? "Saving changes…"
+        : testing
+          ? `Testing the ${testing === "unify" ? "Unify" : "Zoho"} connection…`
+          : hasPendingChanges()
+            ? "You have unsaved changes."
+            : "All changes saved.";
 
   return (
-    <main className="relative overflow-hidden rounded-3xl border border-slate-200/80 bg-white/90 p-6 shadow-[0_20px_60px_-30px_rgba(15,23,42,0.28)] backdrop-blur">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_36%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.12),transparent_28%)]" />
-      <div className="relative space-y-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="max-w-2xl">
-            <div
-              className={[
-                "inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium shadow-sm",
-                hasStoredCredentials
-                  ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
-                  : "border border-slate-200 bg-slate-50 text-slate-600",
-              ].join(" ")}
-            >
-              <ShieldCheckIcon className={`h-4 w-4 ${hasStoredCredentials ? "text-emerald-600" : "text-slate-500"}`} />
-              {statusLabel}
-            </div>
-            <h2 className="mt-4 text-3xl font-semibold tracking-tight text-slate-900">Connections</h2>
-            <p className="mt-2 text-sm leading-6 text-slate-600">
-              Secret values stay hidden here. Stored credentials are marked below, and blank secure fields keep the current value when you save.
-            </p>
-          </div>
-
-          <div className="grid min-w-[220px] gap-3 rounded-2xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm">
-            <div className="flex items-center justify-between text-sm text-slate-600">
-              <span>Stored fields</span>
-              <span className="font-semibold text-slate-900">{settingsLoaded ? storedCount : "Loading..."}</span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-sky-500 transition-all"
-                style={{ width: settingsLoaded ? `${(storedCount / 6) * 100}%` : "0%" }}
-              />
-            </div>
-            <p className="text-xs text-slate-500">
-              {!settingsLoaded
-                ? "Checking securely stored credentials..."
-                : hasStoredCredentials
-                  ? "At least one credential is already saved."
-                  : "No credentials have been stored yet."}
-            </p>
-          </div>
-        </div>
-
-        {message && (
-          <div
+    <main className="space-y-6">
+      <PageHeader
+        eyebrow="Settings"
+        title="Connections"
+        description="Credentials Zconnect uses to read orders from Unify and create draft invoices in Zoho. Saved secrets are never shown again: leave a secure field blank to keep its stored value."
+        actions={
+          <span
             className={[
-              "flex items-start gap-3 rounded-2xl border px-4 py-3 shadow-sm",
-              messageKind === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : messageKind === "error"
-                  ? "border-rose-200 bg-rose-50 text-rose-900"
-                  : "border-sky-200 bg-sky-50 text-sky-900",
+              "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium",
+              hasStoredCredentials ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-white text-slate-600",
             ].join(" ")}
           >
-            <div
-              className={[
-                "mt-0.5 rounded-full p-1",
-                messageKind === "success"
-                  ? "bg-emerald-100 text-emerald-700"
-                  : messageKind === "error"
-                    ? "bg-rose-100 text-rose-700"
-                    : "bg-sky-100 text-sky-700",
-              ].join(" ")}
-            >
-              {messageKind === "success" ? <CheckIcon /> : <SparkIcon />}
-            </div>
-            <p className="text-sm font-medium">{message}</p>
-          </div>
-        )}
+            <ShieldCheckIcon className={`h-4 w-4 ${hasStoredCredentials ? "text-emerald-600" : "text-slate-400"}`} />
+            {settingsLoaded ? `${storedCount} of ${secretTotal} secure values stored` : statusLabel}
+          </span>
+        }
+      />
 
-        <div className="grid gap-5 xl:grid-cols-2">
-          {FIELD_SECTIONS.map((section) => (
-            <section
-              key={section.title}
-              className={`rounded-3xl border border-slate-200 bg-gradient-to-br ${section.accent} p-5 shadow-sm`}
-            >
+      {!isAdmin && settingsLoaded && (
+        <Notice kind="info">You can see which credentials are stored. Only admins can change or test connections.</Notice>
+      )}
+
+      {message && (
+        <Notice kind={noticeKind} onDismiss={() => setMessage("")}>
+          {message}
+        </Notice>
+      )}
+
+      <div className="grid gap-5 xl:grid-cols-2 xl:items-start">
+        {FIELD_SECTIONS.map((section) => {
+          const sectionSecrets = section.fields.filter((field) => field.flagKey);
+          const sectionStored = sectionSecrets.filter((field) => field.flagKey && storedFlags[field.flagKey]).length;
+          return (
+            <section key={section.title} aria-labelledby={`connection-${section.title}`} className={`${CARD} p-5 sm:p-6`}>
               <div className="mb-5 flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-900">{section.title}</h3>
+                <div className="min-w-0">
+                  <h2 id={`connection-${section.title}`} className="text-base font-semibold tracking-tight text-slate-950">
+                    {section.title}
+                  </h2>
                   <p className="mt-1 text-sm text-slate-600">{section.description}</p>
                 </div>
-                <div className="rounded-full border border-white/70 bg-white/80 px-3 py-1 text-xs font-medium text-slate-600 shadow-sm">
-                  Secure
-                </div>
+                {settingsLoaded && sectionSecrets.length > 0 && (
+                  <span className="shrink-0 whitespace-nowrap rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs font-medium tabular-nums text-slate-600">
+                    {sectionStored}/{sectionSecrets.length} stored
+                  </span>
+                )}
               </div>
 
               <div className="space-y-4">
@@ -528,128 +504,84 @@ export function ConnectionsPanel() {
                   const fieldState = !settingsLoaded ? "loading" : isStored ? "saved" : "empty";
 
                   return (
-                    <label
-                      key={field.key}
-                      className={[
-                        "block rounded-2xl border p-4 transition-shadow",
-                        fieldState === "saved"
-                          ? "border-emerald-200 bg-white/80 shadow-[0_0_0_1px_rgba(16,185,129,0.08),0_12px_30px_-20px_rgba(16,185,129,0.35)]"
-                          : fieldState === "loading"
-                            ? "border-sky-200 bg-white/75 shadow-sm"
-                            : "border-slate-200 bg-white/75 shadow-sm",
-                      ].join(" ")}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-semibold text-slate-900">{field.label}</span>
-                        <div
-                          className={[
-                            "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium",
-                            fieldState === "saved"
-                              ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
-                              : fieldState === "loading"
-                                ? "border border-sky-200 bg-sky-50 text-sky-700"
-                                : "border border-slate-200 bg-slate-50 text-slate-500",
-                          ].join(" ")}
-                        >
-                          {fieldState === "saved" ? <CheckIcon className="h-3.5 w-3.5" /> : <LockIcon className="h-3.5 w-3.5" />}
-                          {fieldState === "saved" ? "Saved" : fieldState === "loading" ? "Loading" : "Not stored"}
-                        </div>
-                      </div>
-
-                      <div className="relative mt-3">
+                    <label key={field.key} className="block">
+                      <span className="mb-1.5 flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-slate-700">{field.label}</span>
+                        {isSecret && (
+                          <span
+                            className={[
+                              "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+                              fieldState === "saved"
+                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                : fieldState === "loading"
+                                  ? "border-slate-200 bg-slate-50 text-slate-500"
+                                  : "border-amber-200 bg-amber-50 text-amber-700",
+                            ].join(" ")}
+                          >
+                            {fieldState === "saved" ? <CheckIcon className="h-3 w-3" /> : <LockIcon className="h-3 w-3" />}
+                            {fieldState === "saved" ? "Stored" : fieldState === "loading" ? "Checking…" : "Not stored"}
+                          </span>
+                        )}
+                      </span>
+                      <span className="relative block">
                         {fieldState === "saved" && isSecret && (
-                          <div className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-emerald-600">
+                          <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-emerald-600">
                             <LockIcon className="h-4 w-4" />
-                          </div>
+                          </span>
                         )}
                         <input
                           type={isSecret ? "password" : "text"}
-                          className={[
-                            "w-full rounded-xl border bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition",
-                            fieldState === "saved" && isSecret ? "pl-10" : "",
-                            "border-slate-200 placeholder:text-slate-400 focus:border-sky-400 focus:ring-4 focus:ring-sky-100",
-                          ].join(" ")}
+                          className={`${INPUT} ${fieldState === "saved" && isSecret ? "pl-9" : ""}`}
                           placeholder={
                             isSecret
                               ? fieldState === "saved"
-                                ? "Stored securely"
+                                ? "Stored securely — leave blank to keep"
                                 : fieldState === "loading"
-                                  ? "Checking saved value..."
-                                : "Enter a new value"
+                                  ? "Checking saved value…"
+                                  : "Enter a value"
                               : field.key === "ZOHO_BASE_URL"
                                 ? "https://www.zohoapis.eu"
                                 : "Enter value"
                           }
                           value={inputValue}
                           onChange={(e) => setFormValues({ ...formValues, [field.key]: e.target.value })}
+                          disabled={!isAdmin}
                           autoComplete="off"
                           spellCheck={false}
                         />
-                      </div>
-
-                      <p className="mt-2 text-xs leading-5 text-slate-500">
-                        {!settingsLoaded && isSecret ? "Checking securely stored value..." : field.helper}
-                      </p>
+                      </span>
+                      <span className="mt-1.5 block text-xs leading-5 text-slate-500">
+                        {isSecret && fieldState === "empty"
+                          ? "Not stored yet. Enter a value and save to store it securely."
+                          : isSecret && fieldState === "loading"
+                            ? "Checking whether a value is stored…"
+                            : field.helper}
+                      </span>
                     </label>
                   );
                 })}
               </div>
             </section>
-          ))}
-        </div>
+          );
+        })}
+      </div>
 
-        <div className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-slate-50/80 p-4 shadow-sm sm:flex-row sm:items-center">
-          <button
-            onClick={handleSave}
-            disabled={!isAdmin || isSaving || !hasPendingChanges()}
-            className="inline-flex items-center justify-center rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_10px_24px_-14px_rgba(15,23,42,0.8)] transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {isSaving ? "Saving..." : "Save settings"}
+      <div className={`${CARD} flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5`}>
+        <p className="text-sm text-slate-600" aria-live="polite">
+          {statusLine}
+        </p>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row">
+          <button type="button" onClick={() => testConnection("unify")} disabled={!isAdmin || testing !== null} className={BUTTON_SECONDARY}>
+            {testing === "unify" ? "Testing Unify…" : "Test Unify"}
           </button>
-          <button
-            onClick={testUnify}
-            disabled={!isAdmin}
-            className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-          >
-            Test Unify
+          <button type="button" onClick={() => testConnection("zoho")} disabled={!isAdmin || testing !== null} className={BUTTON_SECONDARY}>
+            {testing === "zoho" ? "Testing Zoho…" : "Test Zoho"}
           </button>
-          <button
-            onClick={testZoho}
-            disabled={!isAdmin}
-            className="inline-flex items-center justify-center rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-          >
-            Test Zoho Connection
+          <button type="button" onClick={handleSave} disabled={!isAdmin || isSaving || !hasPendingChanges()} className={BUTTON_PRIMARY}>
+            {isSaving ? "Saving…" : "Save changes"}
           </button>
-          <div className="text-sm text-slate-500">
-            {!isAdmin
-              ? "Only admins can change or test connections."
-              : !settingsLoaded
-              ? "Loading settings..."
-              : hasPendingChanges()
-                ? "You have unsaved changes."
-                : "No changes to save."}
-          </div>
         </div>
       </div>
-    </main>
-  );
-}
-
-export default function SettingsPage() {
-  return (
-    <main className="space-y-6">
-      <section className="rounded-3xl border border-slate-200/80 bg-white/90 p-8 shadow-[0_20px_60px_-35px_rgba(15,23,42,0.28)] backdrop-blur">
-        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Settings</p>
-        <h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950">App preferences</h2>
-        <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-600">
-          This space is reserved for app-level preferences. Connection credentials now live in Connections.
-        </p>
-        <div className="mt-6">
-          <a className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-900" href="/connections">
-            Open Connections
-          </a>
-        </div>
-      </section>
     </main>
   );
 }

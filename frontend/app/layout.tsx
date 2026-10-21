@@ -1,13 +1,20 @@
 import "./globals.css";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Manrope } from "next/font/google";
 import { AppSessionProvider } from "../components/app-session";
 
 const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 
+// Icons come from the file conventions app/favicon.ico, app/icon.png and app/apple-icon.png.
 export const metadata: Metadata = {
-  title: "Zconnect",
-  description: "Invoice automation for Unify → Zoho",
+  title: { default: "Zconnect", template: "%s · Zconnect" },
+  description: "Invoice automation from Unify to Zoho",
+  applicationName: "Zconnect",
+  robots: { index: false, follow: false },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#1f6aeb",
 };
 
 export default function RootLayout({

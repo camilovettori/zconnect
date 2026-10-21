@@ -1,5 +1,8 @@
 import Image from "next/image";
 
+// 256 px square, padded copy of public/log.png (the original is 675x589 and ~0.5 MB).
+const BRAND_MARK = "/zconnect-mark.png";
+
 export function BrandLogo({
   width = 40,
   height = 40,
@@ -18,15 +21,7 @@ export function BrandLogo({
       ].join(" ")}
       style={{ width, height }}
     >
-      <Image
-        src="/log.png"
-        alt="Zconnect logo"
-        width={width}
-        height={height}
-        className="h-auto w-auto object-contain"
-        priority
-        unoptimized
-      />
+      <Image src={BRAND_MARK} alt="Zconnect logo" width={width} height={height} className="h-auto w-auto object-contain" priority unoptimized />
     </div>
   );
 }
