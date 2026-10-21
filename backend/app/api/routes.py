@@ -29,6 +29,8 @@ from ..schemas import (
 )
 from ..services.unify_service import UnifyService, make_unify_service, UnifyServiceError
 from ..services import analytics_service, csv_parser
+from ..reports import weekly as weekly_report
+from ..reports.periods import ReportPeriodError, resolve_period
 from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
 from ..services.export_service import (
     AuditContext,
@@ -883,6 +885,35 @@ async def analytics_companies(identity: Identity = Depends(require_identity), db
         return {"companies": own, "can_switch": False, "current": identity.company_id}
 
     return _analytics_call(db, load)
+
+
+@router.get("/reports/weekly.pdf")
+def weekly_report_pdf(
+    period: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    company_id: Optional[str] = None,
+    identity: Identity = Depends(require_identity),
+    db: Session = Depends(get_db),
+):
+    """Branded PDF for one company and period (default: last full Monday-Sunday week, Irish time).
+    Read-only: built from the same company-scoped calculation as the Analytics dashboard."""
+    company = _analytics_company(identity, company_id)
+    try:
+        report_period = resolve_period(period, date_from, date_to)
+    except ReportPeriodError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    model = _analytics_call(db, lambda: weekly_report.build_report_model(db, company, report_period))
+    pdf = weekly_report.render_pdf(model)
+    logger.info("Generated report for company %s (%s to %s) for user %s", company, report_period.start, report_period.end, identity.user_id)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{weekly_report.report_filename(model)}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/export/history", response_model=List[dict])

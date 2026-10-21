@@ -79,12 +79,13 @@ COMPANY_SCOPED = {
     ("GET", "/api/analytics/summary"),
     ("GET", "/api/analytics/filters"),
     ("GET", "/api/analytics/companies"),
+    ("GET", "/api/reports/weekly.pdf"),
 }
 
 
 def test_every_api_route_is_covered_by_this_suite():
     """Fails if a new route appears, so its protection level is decided deliberately."""
-    assert len(api_routes()) == 19
+    assert len(api_routes()) == 20
     assert ADMIN_ONLY <= set(api_routes())
     assert COMPANY_SCOPED <= set(api_routes()) and not (COMPANY_SCOPED & ADMIN_ONLY)
 

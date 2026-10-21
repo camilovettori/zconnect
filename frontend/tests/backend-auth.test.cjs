@@ -66,3 +66,26 @@ test('cross-site state-changing requests fail before authentication', async () =
   }));
   assert.equal(result.response.status, 403);
 });
+
+test('PDF proxy preserves binary response and attachment headers', async () => {
+  const pdf = new Uint8Array([37, 80, 68, 70, 45, 49, 0, 255]);
+  const proxy = load('app/api/[...path]/route.ts', {
+    '../../../lib/backend-auth': {
+      authenticateRequest: async () => ({ ok: true, user: { id: 'U', role: 'user', companyId: 'acme' }, refreshedSessionCookie: null }),
+      applySignedIdentity: auth.applySignedIdentity,
+      withRefreshedSession: (response) => response,
+    },
+    'next/server': { NextRequest: Request },
+  });
+  const originalFetch = global.fetch;
+  global.fetch = async (_url, init) => {
+    assert.equal(init.headers.get('x-zconnect-company'), 'acme');
+    return new Response(pdf, { headers: { 'content-type': 'application/pdf', 'content-disposition': 'attachment; filename="weekly.pdf"', 'cache-control': 'no-store' } });
+  };
+  try {
+    const response = await proxy.GET(new Request('http://localhost/api/reports/weekly.pdf'), { params: { path: ['reports', 'weekly.pdf'] } });
+    assert.equal(response.headers.get('content-type'), 'application/pdf');
+    assert.match(response.headers.get('content-disposition'), /weekly.pdf/);
+    assert.deepEqual(new Uint8Array(await response.arrayBuffer()), pdf);
+  } finally { global.fetch = originalFetch; }
+});

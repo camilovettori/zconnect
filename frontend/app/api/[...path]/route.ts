@@ -37,23 +37,25 @@ async function proxy(request: Request, pathSegments: string[]) {
       body,
     });
     const backendDurationMs = performance.now() - backendStartedAt;
-    const text = await res.text();
+    // Raw bytes, so binary downloads (PDF reports) pass through unchanged.
+    const payload = new Uint8Array(await res.arrayBuffer());
 
     console.info("[NextApi] proxy backend response", {
       method,
       path: `/api/${path}${url.search}`,
       status: res.status,
       backendDurationMs,
-      bodyLength: text.length,
+      bodyLength: payload.byteLength,
     });
 
-    return withRefreshedSession(
-      new Response(text, {
-        status: res.status,
-        headers: { "Content-Type": res.headers.get("content-type") || "application/json" },
-      }),
-      auth,
-    );
+    const responseHeaders = new Headers({ "Content-Type": res.headers.get("content-type") || "application/json" });
+    for (const name of ["content-disposition", "cache-control"]) {
+      const value = res.headers.get(name);
+      if (value) {
+        responseHeaders.set(name, value);
+      }
+    }
+    return withRefreshedSession(new Response(payload, { status: res.status, headers: responseHeaders }), auth);
   } catch (err) {
     console.error("[NextApi] proxy failed", {
       method,

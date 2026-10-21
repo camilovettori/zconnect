@@ -37,6 +37,7 @@ type Option = { key: string; name: string };
 type Companies = { companies: Array<{ id: string; name: string }>; can_switch: boolean; current: string };
 type Granularity = "day" | "week" | "month";
 type Preset = "last_7" | "last_30" | "last_90" | "this_month" | "last_month" | "this_year" | "custom";
+type ReportPeriod = "last_week" | "this_week" | "last_month" | "this_month" | "custom";
 
 const PRESETS: Array<{ value: Preset; label: string }> = [
   { value: "last_7", label: "Last 7 days" },
@@ -48,6 +49,13 @@ const PRESETS: Array<{ value: Preset; label: string }> = [
   { value: "custom", label: "Custom range" },
 ];
 
+const REPORT_PERIODS: Array<{ value: ReportPeriod; label: string }> = [
+  { value: "last_week", label: "Last week (Mon–Sun)" },
+  { value: "this_week", label: "This week to date" },
+  { value: "last_month", label: "Last month" },
+  { value: "this_month", label: "This month to date" },
+  { value: "custom", label: "Selected date range" },
+];
 
 const NOT_RECORDED = "Not recorded";
 
@@ -130,6 +138,9 @@ export default function AnalyticsPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>("last_week");
+  const [downloading, setDownloading] = useState(false);
+  const [reportNotice, setReportNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   const companyQuery = companies?.can_switch && companyId ? `company_id=${encodeURIComponent(companyId)}` : "";
 
@@ -205,6 +216,36 @@ export default function AnalyticsPage() {
     setProduct("");
   };
 
+  const downloadReport = async () => {
+    setDownloading(true);
+    setReportNotice(null);
+    const params = new URLSearchParams({ period: reportPeriod });
+    if (reportPeriod === "custom") {
+      params.set("date_from", dateFrom);
+      params.set("date_to", dateTo);
+    }
+    if (companyQuery) params.set("company_id", companyId);
+    try {
+      const response = await fetch(`/api/reports/weekly.pdf?${params.toString()}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(await readError(response));
+      const blob = await response.blob();
+      const disposition = response.headers.get("content-disposition") || "";
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] || "zconnect-report.pdf";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      setReportNotice({ kind: "success", text: `Report downloaded: ${filename}` });
+    } catch (err) {
+      setReportNotice({ kind: "error", text: err instanceof Error ? err.message : "The report could not be generated." });
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const currency = summary?.currency ?? null;
   const k = summary?.kpis;
@@ -391,6 +432,45 @@ export default function AnalyticsPage() {
           </>
         )}
 
+        <section aria-labelledby="report-heading" className={`${CARD} p-4 sm:p-5`}>
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-xl">
+              <h2 id="report-heading" className="text-base font-semibold tracking-tight text-slate-950">
+                PDF report
+              </h2>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                A branded report with the sales summary, invoices, top customers and products, trend and sync outcomes for {companyName || "your company"},
+                compared with the previous period. Weeks run Monday to Sunday, Irish time.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <label className="block sm:w-60">
+                <span className={LABEL}>Report period</span>
+                <select className={INPUT} value={reportPeriod} onChange={(event) => setReportPeriod(event.target.value as ReportPeriod)}>
+                  {REPORT_PERIODS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button type="button" className={BUTTON_PRIMARY} onClick={downloadReport} disabled={downloading || (reportPeriod === "custom" && Boolean(rangeError))}>
+                <DownloadIcon />
+                {downloading ? "Preparing report…" : "Download PDF"}
+              </button>
+            </div>
+          </div>
+          {reportPeriod === "custom" && (
+            <p className="mt-3 text-xs text-slate-500">
+              Uses the dashboard range: {formatDay(dateFrom)} – {formatDay(dateTo)} (at most one year).
+            </p>
+          )}
+          {reportNotice && (
+            <Notice kind={reportNotice.kind} onDismiss={() => setReportNotice(null)} className="mt-4">
+              {reportNotice.text}
+            </Notice>
+          )}
+        </section>
       </main>
     </AppShell>
   );
@@ -701,5 +781,13 @@ function EmptyChart({ text, compact = false }: { text: string; compact?: boolean
     <div className={`flex items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 text-center text-sm text-slate-500 ${compact ? "py-8" : "h-48"}`}>
       {text}
     </div>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4">
+      <path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19h14" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+    </svg>
   );
 }
