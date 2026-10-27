@@ -451,58 +451,68 @@ class ZohoService:
         )
 
     async def find_invoices_by_reference_number(self, reference_number: str) -> List[Dict[str, Any]]:
-        """Return Zoho invoices whose reference number matches `reference_number`.
+        """Retrieve every filtered page before deciding whether an invoice exists.
 
-        Raises ZohoLookupError whenever the answer may be incomplete or untrustworthy
-        (HTTP error, unexpected shape, more pages, or a filter that appears unsupported).
-        Callers must not create an invoice when this raises.
+        Fail closed on API errors, malformed pagination or suspicious filter results.
         """
         reference = (reference_number or "").strip()
         if not reference:
             raise ZohoLookupError("Cannot look up invoices without a reference number")
 
-        # Documented list-invoices filters (Zoho Invoice API v3): reference_number, and
-        # filter_by=Status.All so drafts (which Zconnect creates) are never excluded by a
-        # default status filter. Requires the ZohoInvoice.invoices.READ scope.
-        try:
-            resp = await self._request(
-                "GET",
-                "/invoices",
-                params={"reference_number": reference, "filter_by": "Status.All", "per_page": INVOICE_LOOKUP_PAGE_SIZE},
-            )
-        except Exception as exc:
-            raise ZohoLookupError(f"Zoho invoice lookup request failed: {exc}") from exc
+        all_invoices: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            try:
+                resp = await self._request(
+                    "GET",
+                    "/invoices",
+                    params={
+                        "reference_number": reference,
+                        "filter_by": "Status.All",
+                        "per_page": INVOICE_LOOKUP_PAGE_SIZE,
+                        "page": page,
+                    },
+                )
+            except Exception as exc:
+                raise ZohoLookupError(f"Zoho invoice lookup request failed on page {page}: {exc}") from exc
 
-        if resp.status_code != 200:
-            raise ZohoLookupError(f"Zoho invoice lookup failed {resp.status_code}: {resp.text}")
+            if resp.status_code != 200:
+                raise ZohoLookupError(f"Zoho invoice lookup failed on page {page} ({resp.status_code}): {resp.text}")
 
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise ZohoLookupError("Zoho invoice lookup returned invalid JSON") from exc
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                raise ZohoLookupError(f"Zoho invoice lookup returned invalid JSON on page {page}") from exc
 
-        invoices = data.get("invoices") if isinstance(data, dict) else None
-        if not isinstance(invoices, list):
-            raise ZohoLookupError("Zoho invoice lookup response has no invoices list")
+            invoices = data.get("invoices") if isinstance(data, dict) else None
+            context = data.get("page_context") if isinstance(data, dict) else None
+            if not isinstance(invoices, list):
+                raise ZohoLookupError(f"Zoho invoice lookup response has no invoices list on page {page}")
+            if not isinstance(context, dict) or type(context.get("has_more_page")) is not bool:
+                raise ZohoLookupError(f"Zoho invoice lookup has invalid pagination metadata on page {page}")
+            if "page" in context:
+                try:
+                    reported_page = int(context["page"])
+                except (ValueError, TypeError) as exc:
+                    raise ZohoLookupError("Zoho invoice lookup returned invalid page number") from exc
+                if reported_page != page:
+                    raise ZohoLookupError("Zoho invoice lookup returned an unexpected page number")
+            if context["has_more_page"] and not invoices:
+                raise ZohoLookupError("Zoho invoice lookup returned an empty intermediate page")
 
-        # Zoho documents page_context.has_more_page on list responses; without it we cannot
-        # prove the result is complete, so fail closed.
-        page_context = data.get("page_context") if isinstance(data, dict) else None
-        if not isinstance(page_context, dict) or "has_more_page" not in page_context:
-            raise ZohoLookupError("Zoho invoice lookup response has no page_context; completeness unknown")
-        if page_context.get("has_more_page"):
-            raise ZohoLookupError("Zoho invoice lookup returned more than one page; result is incomplete")
+            for invoice in invoices:
+                if not isinstance(invoice, dict):
+                    raise ZohoLookupError("Zoho invoice lookup returned an unexpected invoice entry")
+                candidate = str(invoice.get("reference_number") or "").strip().lower()
+                if reference.lower() not in candidate:
+                    raise ZohoLookupError("Zoho invoice lookup filter appears unsupported")
+                all_invoices.append(invoice)
 
-        lowered = reference.lower()
-        for invoice in invoices:
-            if not isinstance(invoice, dict):
-                raise ZohoLookupError("Zoho invoice lookup returned an unexpected invoice entry")
-            candidate = str(invoice.get("reference_number") or "").strip().lower()
-            if lowered not in candidate:
-                # Results that do not even contain the reference mean the filter was ignored.
-                raise ZohoLookupError("Zoho invoice lookup filter appears unsupported")
-
-        return invoices
+            if not context["has_more_page"]:
+                return all_invoices
+            page += 1
+            if page > 1000:
+                raise ZohoLookupError("Zoho invoice lookup exceeded safe pagination limit")
 
     async def create_draft_invoice(self, contact_id: str, lines: List[Dict[str, Any]], reference_number: str) -> str:
         payload = {
