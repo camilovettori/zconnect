@@ -451,7 +451,7 @@ class ZohoService:
         )
 
     async def find_invoices_by_reference_number(self, reference_number: str) -> List[Dict[str, Any]]:
-        """Retrieve every filtered page before deciding whether an invoice exists.
+        """Scan all invoice pages before deciding whether a reference exists.
 
         Fail closed on API errors, malformed pagination or suspicious filter results.
         """
@@ -459,6 +459,8 @@ class ZohoService:
         if not reference:
             raise ZohoLookupError("Cannot look up invoices without a reference number")
 
+        # Do not rely on reference_number filtering: some Zoho accounts ignore it.
+        # Scan every page, then retain only exact reference matches.
         all_invoices: List[Dict[str, Any]] = []
         page = 1
         while True:
@@ -467,8 +469,7 @@ class ZohoService:
                     "GET",
                     "/invoices",
                     params={
-                        "reference_number": reference,
-                        "filter_by": "Status.All",
+                                    "filter_by": "Status.All",
                         "per_page": INVOICE_LOOKUP_PAGE_SIZE,
                         "page": page,
                     },
@@ -504,9 +505,8 @@ class ZohoService:
                 if not isinstance(invoice, dict):
                     raise ZohoLookupError("Zoho invoice lookup returned an unexpected invoice entry")
                 candidate = str(invoice.get("reference_number") or "").strip().lower()
-                if reference.lower() not in candidate:
-                    raise ZohoLookupError("Zoho invoice lookup filter appears unsupported")
-                all_invoices.append(invoice)
+                if candidate == reference.casefold():
+                    all_invoices.append(invoice)
 
             if not context["has_more_page"]:
                 return all_invoices
