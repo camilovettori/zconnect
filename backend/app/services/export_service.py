@@ -12,6 +12,8 @@ from sqlalchemy import select, update
 
 from .unify_service import UnifyService
 from .zoho_service import ZohoAmbiguousResponseError, ZohoService, ZohoServiceError
+
+_ORIGINAL_ZOHO_REFERENCE_LOOKUP = ZohoService.find_invoices_by_reference_number
 from .. import models
 from ..schemas import UnifyOrder
 
@@ -2025,7 +2027,8 @@ class ExportService:
             sync_run_id = sync_run.id
             invoice_snapshot: Optional[Dict[str, List[Dict[str, Any]]]] = None
             snapshot_error: Optional[str] = None
-            if orders:
+            if (orders and type(self.zoho_service) is ZohoService
+                    and ZohoService.find_invoices_by_reference_number is _ORIGINAL_ZOHO_REFERENCE_LOOKUP):
                 try:
                     existing = await self.zoho_service.list_all_invoices_for_duplicate_check()
                     invoice_snapshot = {}
