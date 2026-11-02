@@ -1566,6 +1566,7 @@ class ExportService:
         *,
         contact_id: Optional[str] = None,
         customer_name: Optional[str] = None,
+        invoice_snapshot: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> Tuple[str, Optional[str], str]:
         """Check Zoho for an invoice that already represents this order.
 
@@ -1580,7 +1581,8 @@ class ExportService:
         - "lookup_failed": lookup errored or its result may be incomplete -> never create
         """
         try:
-            invoices = await self.zoho_service.find_invoices_by_reference_number(order_id)
+            invoices = (invoice_snapshot.get(order_id.strip().casefold(), []) if invoice_snapshot is not None
+                        else await self.zoho_service.find_invoices_by_reference_number(order_id))
         except ZohoServiceError as exc:
             return "lookup_failed", None, str(exc)
 
@@ -1605,7 +1607,7 @@ class ExportService:
         )
         return "ambiguous", None, f"Zoho has {len(active)} active invoice(s) with reference {order_id} that could not be matched safely: {summary}"
 
-    async def _process_order(self, db: Session, sync_run_id: int, order: UnifyOrder, state: _OrderAttemptState) -> Tuple[Dict[str, Any], str]:
+    async def _process_order(self, db: Session, sync_run_id: int, order: UnifyOrder, state: _OrderAttemptState, invoice_snapshot: Optional[Dict[str, List[Dict[str, Any]]]] = None) -> Tuple[Dict[str, Any], str]:
         """Export one order. Returns (detail, outcome) where outcome is one of
         created / skipped / failed / needs_verification."""
         order_id = order.order_id
@@ -1686,7 +1688,7 @@ class ExportService:
             return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
 
         # Zoho duplicate check before EVERY creation (new orders, retries and resets).
-        verdict, existing_invoice_id, verdict_detail = await self._verify_existing_zoho_invoice(order_id, contact_id=contact_id)
+        verdict, existing_invoice_id, verdict_detail = await self._verify_existing_zoho_invoice(order_id, contact_id=contact_id, invoice_snapshot=invoice_snapshot)
         logger.info(
             "Zoho duplicate check order_id=%s prior_status=%s verdict=%s invoice_id=%s detail=%s",
             order_id,
@@ -1756,6 +1758,8 @@ class ExportService:
             return self._finalize_claim(db, sync_run_id, state, EXPORT_STATUS_FAILED, reason), "failed"
 
         state.zoho_invoice_id = invoice_id
+        if invoice_snapshot is not None:
+            invoice_snapshot.setdefault(order_id.strip().casefold(), []).append({"reference_number": order_id, "invoice_id": invoice_id, "customer_id": contact_id, "status": "draft"})
         logger.info("Zoho response received order_id=%s invoice_id=%s", order_id, invoice_id)
         logger.info("Created draft invoice %s for order %s", invoice_id, order_id)
         logger.info(
@@ -2019,12 +2023,29 @@ class ExportService:
 
             # Read once: touching sync_run after a failed flush (before rollback) would raise.
             sync_run_id = sync_run.id
+            invoice_snapshot: Optional[Dict[str, List[Dict[str, Any]]]] = None
+            snapshot_error: Optional[str] = None
+            if orders:
+                try:
+                    existing = await self.zoho_service.list_all_invoices_for_duplicate_check()
+                    invoice_snapshot = {}
+                    for invoice in existing:
+                        key = str(invoice.get("reference_number") or "").strip().casefold()
+                        if key:
+                            invoice_snapshot.setdefault(key, []).append(invoice)
+                    logger.info("Zoho batch snapshot invoices=%s references=%s", len(existing), len(invoice_snapshot))
+                except ZohoServiceError as exc:
+                    snapshot_error = str(exc)
             for order in orders:
                 attempted_orders += 1
                 stage = f"processing_order:{order.order_id}"
                 attempt_state = _OrderAttemptState(order_id=order.order_id)
                 try:
-                    detail, outcome = await self._process_order(db, sync_run_id, order, attempt_state)
+                    if snapshot_error:
+                        detail = {"order_id": order.order_id, "status": "failed", "message": f"Zoho duplicate check could not be completed: {snapshot_error}"}
+                        outcome = "failed"
+                    else:
+                        detail, outcome = await self._process_order(db, sync_run_id, order, attempt_state, invoice_snapshot=invoice_snapshot)
                 except Exception as exc:  # isolate failures per order; never abort the batch
                     detail, outcome = self._handle_unexpected_order_error(db, sync_run_id, order, attempt_state, exc)
 
