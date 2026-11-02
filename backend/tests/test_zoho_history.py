@@ -87,3 +87,47 @@ def test_invoice_does_not_accept_nonfinite_money():
     bad = invoice(amount="NaN")
     with pytest.raises(HistoricalImportError, match="Non-finite"):
         _normalise_invoice(bad)
+
+
+def test_invoice_level_discount_requires_reconciliation():
+    record = invoice(amount="20.00")
+    record["sub_total"] = "18.00"
+    with pytest.raises(HistoricalImportError, match="subtotal differs"):
+        _normalise_invoice(record)
+
+
+def test_tiny_rounding_difference_is_accepted():
+    record = invoice(amount="20.00")
+    record["sub_total"] = "19.99"
+    assert _normalise_invoice(record)["net_amount"] == Decimal("19.99")
+
+
+def test_historical_invoice_date_change_never_double_counts(db):
+    from app.services import analytics_service
+    original = models.OrderFact(
+        company_id="default", unify_order_id="UNIFY-1", zoho_invoice_id="123",
+        customer_key="customer-1", customer_name="Cafe A",
+        invoice_date=date(2026, 10, 9), currency="EUR",
+        net_amount=Decimal("20.00"), line_count=1, source="invoice_created"
+    )
+    db.add(original)
+    db.flush()
+    db.add(models.OrderLineFact(
+        order_fact_id=original.id, company_id="default",
+        product_key="zoho:item-7", product_name="Brownie",
+        quantity=Decimal("2"), unit_price=Decimal("10"),
+        net_amount=Decimal("20.00")
+    ))
+    db.commit()
+    persist_snapshot(db, company_id="default", zoho_org_id="org-1", snapshot=[_normalise_invoice(invoice())])
+    def summary(start, end):
+        return analytics_service.compute_summary(
+            db, analytics_service.AnalyticsFilters(
+                company_id="default", date_from=start, date_to=end, granularity="day"
+            )
+        )
+    old_date = summary(date(2026, 10, 9), date(2026, 10, 9))
+    new_date = summary(date(2026, 10, 10), date(2026, 10, 10))
+    assert old_date["kpis"]["invoiced_value"] == "0.00"
+    assert new_date["kpis"]["invoiced_value"] == "20.00"
+    assert new_date["top_customers"][0]["name"] == "Cafe A"
