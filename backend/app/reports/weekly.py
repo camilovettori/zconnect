@@ -20,11 +20,11 @@ from . import components as ui
 from . import formatting as fmt
 from .periods import ReportPeriod
 
-REPORT_TITLE = "Sales & invoicing report"
+REPORT_TITLE = "Business performance report"
 DRAFT_NOTICE = (
     "<b>Invoiced value is not paid revenue.</b> Values are the net, pre-tax totals of the "
     "<b>draft invoices</b> Zconnect created in Zoho Books, dated by invoice date. They do not show "
-    "whether an invoice was approved, sent or paid. Sync counts are activity, never money."
+    "whether an invoice was approved, sent or paid. Invoice values are not cash received."
 )
 
 
@@ -104,16 +104,13 @@ def _change_caption(current: Optional[str], previous: Optional[str], fallback: s
 
 def kpi_items(model: ReportModel) -> List[ui.Kpi]:
     k, p, cur = model.kpis, model.prior["kpis"], model.currency
-    runs = k["sync_runs"]
     return [
         ui.Kpi("Invoiced value (net, draft)", fmt.money(k["invoiced_value"], cur), _change_caption(k["invoiced_value"], p["invoiced_value"], "Draft invoices · not paid revenue", model.prior_complete)),
         ui.Kpi("Orders invoiced", fmt.count(k["orders_with_value"]), _change_caption(k["orders_with_value"], p["orders_with_value"], "Orders with a recorded value", model.prior_complete)),
         ui.Kpi("Average order value", "–", "No invoiced orders in this period")
         if k["orders_with_value"] == 0
         else ui.Kpi("Average order value", fmt.money(k["average_order_value"], cur), "Net, per invoiced order"),
-        ui.Kpi("Draft invoices created", fmt.count(k["invoices_created"]), "In Zoho Books, by sync date"),
-        ui.Kpi("Successful syncs", fmt.count(runs["success"]), f"of {fmt.count(runs['total'])} sync runs"),
-        ui.Kpi("Failed syncs", fmt.count(runs["failed"]), f"{fmt.count(runs['partial'])} partial · {fmt.count(runs['skipped'])} with nothing to export"),
+        ui.Kpi("Draft invoices created", fmt.count(k["invoices_created"]), "Created by Zconnect during this period"),
     ]
 
 
@@ -176,7 +173,7 @@ def render_pdf(model: ReportModel, *, compress: bool = True) -> bytes:
         story.append(ui.Spacer(1, 6))
     story.append(ui.data_table(["Period", "Orders invoiced", "Invoiced value (net)"], trend_rows(model), [0.5, 0.2, 0.3], numeric_columns=(1, 2)))
 
-    story += ui.section("Invoice summary")
+    story += ui.section("Orders and invoices")
     partial = "" if model.prior_complete or model.prior["kpis"]["invoiced_value"] is None else " (partial)"
     invoice_rows = [
         ["Draft invoices created in Zoho Books", fmt.count(k["invoices_created"]), fmt.count(model.prior["kpis"]["invoices_created"])],
@@ -206,19 +203,6 @@ def render_pdf(model: ReportModel, *, compress: bool = True) -> bytes:
                       empty_text="No invoice lines recorded for this period. Delivery charges are excluded from products.")
     )
 
-    runs, prior_runs = k["sync_runs"], model.prior["kpis"]["sync_runs"]
-    empty_caption = " - No synchronisation ran in this period." if runs["total"] == 0 else ""
-    story += ui.section("Synchronisation summary" + empty_caption)
-    sync_rows = [
-        ["Successful", fmt.count(runs["success"]), fmt.percent(runs["success"], runs["total"]), fmt.count(prior_runs["success"])],
-        ["Partial (some orders failed)", fmt.count(runs["partial"]), fmt.percent(runs["partial"], runs["total"]), fmt.count(prior_runs["partial"])],
-        ["Failed", fmt.count(runs["failed"]), fmt.percent(runs["failed"], runs["total"]), fmt.count(prior_runs["failed"])],
-        ["Nothing to export", fmt.count(runs["skipped"]), fmt.percent(runs["skipped"], runs["total"]), fmt.count(prior_runs["skipped"])],
-        ["Total sync runs", fmt.count(runs["total"]), "", fmt.count(prior_runs["total"])],
-    ]
-    if runs["running"]:
-        sync_rows.insert(4, ["Still running at report time", fmt.count(runs["running"]), fmt.percent(runs["running"], runs["total"]), fmt.count(prior_runs["running"])])
-    story.append(ui.data_table(["Outcome", "Runs", "Share", "Previous period"], sync_rows, [0.46, 0.16, 0.16, 0.22], numeric_columns=(1, 2, 3)))
     return ui.BrandedReport(header, compress=compress).build(story)
 
 
