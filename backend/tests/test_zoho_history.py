@@ -131,3 +131,23 @@ def test_historical_invoice_date_change_never_double_counts(db):
     assert old_date["kpis"]["invoiced_value"] is None
     assert new_date["kpis"]["invoiced_value"] == "20.00"
     assert new_date["top_customers"][0]["name"] == "Cafe A"
+
+
+
+def test_dry_run_preview_summarises_without_customer_data():
+    from app.services.zoho_history_service import preview_snapshot
+    first = _normalise_invoice(invoice(invoice_id="inv1", amount="20.00"))
+    second_data = invoice(invoice_id="inv2", amount="12.00")
+    second_data["status"] = "paid"
+    second_data["date"] = "2026-10-12"
+    second = _normalise_invoice(second_data)
+    preview = preview_snapshot([first, second])
+    assert preview == {
+        "validated_invoices": 2,
+        "status_counts": {"paid": 1, "sent": 1},
+        "net_by_currency": {"EUR": "32.00"},
+        "first_invoice_date": "2026-10-10",
+        "last_invoice_date": "2026-10-12",
+    }
+    assert "Cafe A" not in str(preview)
+    assert "inv1" not in str(preview)
