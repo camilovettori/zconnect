@@ -28,7 +28,7 @@ from ..schemas import (
     SettingsResponse,
 )
 from ..services.unify_service import UnifyService, make_unify_service, UnifyServiceError
-from ..services import analytics_service, csv_parser
+from ..services import analytics_service, csv_parser, zoho_history_service
 from ..reports import weekly as weekly_report
 from ..reports.periods import ReportPeriodError, resolve_period
 from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
@@ -847,6 +847,44 @@ def _analytics_call(db: Session, fn):
         db.rollback()
         logger.error("Analytics query failed: %s", exc.__class__.__name__)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=ANALYTICS_UNAVAILABLE) from exc
+
+
+@router.post("/analytics/import-zoho-history", dependencies=[Depends(require_admin)])
+async def import_zoho_history(
+    dry_run: bool = True,
+    identity: Identity = Depends(require_identity),
+    db: Session = Depends(get_db),
+):
+    """Explicit admin-only historical backfill; no Zoho write operations.
+
+    Intentionally disabled until the approved 0004 migration and feature flag
+    have been deployed. Dry run validates every page and every invoice first.
+    The current Zoho credentials are global, so only the default company can
+    import them; never map one tenant's invoices to another tenant.
+    """
+    import os
+    if os.environ.get("ZCONNECT_ENABLE_ZOHO_HISTORY_IMPORT") != "1":
+        raise HTTPException(status_code=503, detail="Zoho history import is disabled")
+    if identity.company_id != models.DEFAULT_COMPANY_ID:
+        raise HTTPException(status_code=403, detail="History import is limited to the configured Zoho organisation's company")
+    zoho = make_zoho_service()
+    try:
+        snapshot = await zoho_history_service.fetch_snapshot(zoho)
+        if dry_run:
+            return {"dry_run": True, "validated_invoices": len(snapshot), "saved": False}
+        result = zoho_history_service.persist_snapshot(
+            db, company_id=models.DEFAULT_COMPANY_ID, zoho_org_id=zoho.org_id, snapshot=snapshot
+        )
+        logger.info("Zoho history imported %s invoices for default company by %s", result["total"], identity.user_id)
+        return {"dry_run": False, "saved": True, **result}
+    except (zoho_history_service.HistoricalImportError, ZohoLookupError, ZohoServiceError) as exc:
+        db.rollback()
+        logger.warning("Zoho history validation failed: %s", exc.__class__.__name__)
+        raise HTTPException(status_code=422, detail="Zoho invoice snapshot is incomplete or invalid; no history was saved") from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Zoho history persistence error: %s", exc.__class__.__name__)
+        raise HTTPException(status_code=503, detail="Historical invoice storage is unavailable; check migration 0004") from exc
 
 
 @router.get("/analytics/summary")
