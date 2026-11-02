@@ -188,6 +188,8 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
     currencies = sorted({fact.currency for fact, _lines, _value in rows})
     total_value = sum((value for _fact, _lines, value in rows), Decimal("0"))
     orders_with_value = len(rows)
+    active_customers = len({fact.customer_key for fact, _lines, _value in rows})
+    units_sold = sum((Decimal(line.quantity) for _fact, lines, _value in rows for line in lines if line.product_key != DELIVERY_PRODUCT_KEY), Decimal('0'))
 
     capture_start_at = db.execute(select(func.min(models.OrderFact.captured_at)).where(models.OrderFact.company_id == f.company_id)).scalar()
     capture_start = capture_start_at.date() if isinstance(capture_start_at, datetime) else capture_start_at
@@ -255,7 +257,7 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
             }
         )
 
-    # Top customers and products by captured value.
+    # Top customers and products by captured and imported invoice value.
     customers: Dict[str, Dict] = {}
     for fact, _lines, value in rows:
         entry = customers.setdefault(fact.customer_key, {"key": fact.customer_key, "name": fact.customer_name or fact.customer_key, "value": Decimal("0"), "orders": 0})
@@ -292,6 +294,8 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
             # None = unknown (nothing captured for this range yet, or mixed currencies); never 0.
             "invoiced_value": None if not value_known else money(total_value),
             "orders_with_value": orders_with_value if value_known else None,
+            "active_customers": active_customers,
+            "units_sold": str(units_sold.normalize()),
             "average_order_value": money(total_value / orders_with_value) if value_known and orders_with_value else None,
             "invoices_created": invoices_created,
             "exported_orders": exported_orders,
