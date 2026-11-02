@@ -203,6 +203,16 @@ def render_pdf(model: ReportModel, *, compress: bool = True) -> bytes:
                       empty_text="No invoice lines recorded for this period. Delivery charges are excluded from products.")
     )
 
+    story += ui.section("Best-selling products by quantity")
+    volume_rows = [
+        [p["name"], fmt.quantity(p["quantity"]), fmt.count(p["orders"]), fmt.money(p["value"], cur)]
+        for p in model.current.get("top_products_by_quantity", [])
+    ]
+    story.append(
+        ui.data_table(["Product", "Units sold", "Orders", "Net invoiced value"], volume_rows,
+                      [0.46, 0.16, 0.14, 0.24], numeric_columns=(1, 2, 3),
+                      empty_text="No products recorded for this period.")
+    )
     return ui.BrandedReport(header, compress=compress).build(story)
 
 
