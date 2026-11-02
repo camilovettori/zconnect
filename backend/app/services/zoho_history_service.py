@@ -56,7 +56,10 @@ def _normalise_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
         name = _required(line.get("name") or line.get("description"), f"line name for {invoice_id}")
         quantity = _decimal(line.get("quantity"), "quantity")
         net = _decimal(line.get("item_total"), "item_total")
-        key = str(line.get("item_id") or "").strip() or ("name:" + " ".join(name.casefold().split()))
+        item_id = str(line.get("item_id") or "").strip()
+        key = ("zoho:" + item_id) if item_id else ("name:" + " ".join(name.casefold().split()))
+        if name.casefold() == "delivery charge":
+            key = "delivery"
         lines.append({
             "zoho_line_item_id": str(line.get("line_item_id") or "").strip() or None,
             "product_key": key[:255],
