@@ -871,7 +871,7 @@ async def import_zoho_history(
     try:
         snapshot = await zoho_history_service.fetch_snapshot(zoho)
         if dry_run:
-            return {"dry_run": True, "validated_invoices": len(snapshot), "saved": False}
+            return {"dry_run": True, "saved": False, **zoho_history_service.preview_snapshot(snapshot)}
         result = zoho_history_service.persist_snapshot(
             db, company_id=models.DEFAULT_COMPANY_ID, zoho_org_id=zoho.org_id, snapshot=snapshot
         )
