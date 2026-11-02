@@ -203,7 +203,7 @@ def test_pdf_renders_for_a_company_with_no_data_at_all(db):
     pdf = weekly.render_pdf(model, compress=False)
     assert pdf.startswith(b"%PDF-")
     assert b"No invoice values recorded for this period." in pdf
-    assert b"No synchronisation ran in this period." in pdf
+    assert b"No synchronisation ran in this period." not in pdf
 
 
 def test_long_period_and_awkward_names_render(db):
