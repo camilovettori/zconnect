@@ -19,6 +19,8 @@ type Summary = {
     orders_with_value: number | null;
     average_order_value: string | null;
     invoices_created: number;
+    active_customers: number;
+    units_sold: string;
     exported_orders: number | null;
     sync_runs: { success: number; partial: number; failed: number; skipped: number; running: number; total: number };
   };
@@ -32,6 +34,7 @@ type Summary = {
   series: Bucket[];
   top_customers: Ranked[];
   top_products: Ranked[];
+  top_products_by_quantity?: Ranked[];
 };
 type Option = { key: string; name: string };
 type Companies = { companies: Array<{ id: string; name: string }>; can_switch: boolean; current: string };
@@ -256,7 +259,7 @@ export default function AnalyticsPage() {
     <AppShell>
       <main className="space-y-6">
         <PageHeader
-          eyebrow="Analytics"
+          eyebrow="Business insights"
           title="Sales & invoicing analytics"
           description={
             <>
@@ -365,35 +368,24 @@ export default function AnalyticsPage() {
 
         {coverage && <CoverageNotice summary={summary!} />}
 
-        <section aria-label="Key figures" aria-busy={loading} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          <KpiCard label="Invoiced value (net, draft)" loading={loading && !summary} value={k ? money(k.invoiced_value, currency) : "–"} caption="Draft invoices · not paid revenue" />
-          <KpiCard label="Orders invoiced" loading={loading && !summary} value={k ? count(k.orders_with_value) : "–"} caption="Orders with a recorded value" />
+        <section aria-label="Sales key figures" aria-busy={loading} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <KpiCard label="Net invoiced value" loading={loading && !summary} value={k ? money(k.invoiced_value, currency) : "–"} caption="Net of VAT · not cash received" />
+          <KpiCard label="Invoiced records" loading={loading && !summary} value={k ? count(k.orders_with_value) : "–"} caption="Captured orders and imported Zoho invoices" />
           <KpiCard
             label="Average order value"
             loading={loading && !summary}
             value={k ? (k.orders_with_value === 0 ? "–" : money(k.average_order_value, currency)) : "–"}
             caption={k?.orders_with_value === 0 ? "No invoiced orders in this range" : "Net, per invoiced order"}
           />
+          <KpiCard label="Active customers" loading={loading && !summary} value={k ? count(k.active_customers) : "–"} caption="Distinct customer IDs in selected invoiced records" />
+          <KpiCard label="Units sold" loading={loading && !summary} value={k ? Number(k.units_sold).toLocaleString("en-IE") : "–"} caption="Product units, excluding delivery charges" />
           <KpiCard
             label="Draft invoices created"
             loading={loading && !summary}
             value={k ? count(k.invoices_created) : "–"}
             caption={product ? "Captured orders with this product" : "In Zoho Books, by sync date"}
           />
-          <KpiCard
-            label="Successful syncs"
-            loading={loading && !summary}
-            value={k ? count(k.sync_runs.success) : "–"}
-            caption={k ? `of ${count(k.sync_runs.total)} sync runs` : ""}
-            tone="success"
-          />
-          <KpiCard
-            label="Failed syncs"
-            loading={loading && !summary}
-            value={k ? count(k.sync_runs.failed) : "–"}
-            caption={k ? `${count(k.sync_runs.partial)} partial · ${count(k.sync_runs.skipped)} with nothing to export` : ""}
-            tone={k && k.sync_runs.failed > 0 ? "danger" : undefined}
-          />
+
         </section>
 
         {summary && (
@@ -407,10 +399,10 @@ export default function AnalyticsPage() {
               </Panel>
             </div>
             <div className="grid gap-6 lg:grid-cols-2">
-              <Panel title="Top customers" subtitle="By invoiced value (net).">
+              <Panel title="Top customers" subtitle="Largest customer accounts by net invoiced value and order count.">
                 <RankedBars items={summary.top_customers} currency={currency} detail={(item) => `${count(item.orders)} order${item.orders === 1 ? "" : "s"}`} empty="No invoice values recorded for this range." />
               </Panel>
-              <Panel title="Top products" subtitle="By invoiced value (net). Delivery charges excluded.">
+              <Panel title="Top-selling products" subtitle="Ranked by net invoice value, with units sold. Delivery charges excluded.">
                 <RankedBars
                   items={summary.top_products}
                   currency={currency}
@@ -419,15 +411,13 @@ export default function AnalyticsPage() {
                 />
               </Panel>
             </div>
-            <Panel
-              title="Sync outcomes"
-              subtitle={
-                summary.coverage.sync_runs_ignore_customer_and_product_filters
-                  ? "Sync runs cover all customers and products, so customer and product filters do not apply here."
-                  : "Sync runs started in the selected range. Activity counts, not money."
-              }
-            >
-              <SyncOutcomes runs={summary.kpis.sync_runs} />
+            <Panel title="Best-selling products by units" subtitle="Ranked by quantity sold, with net invoiced value for context. Delivery charges excluded.">
+              <RankedBars
+                items={summary.top_products_by_quantity || []}
+                currency={currency}
+                detail={(item) => `Qty ${Number(item.quantity ?? 0).toLocaleString("en-IE")} · ${count(item.orders)} orders`}
+                empty="No product quantities recorded for this range."
+              />
             </Panel>
           </>
         )}
@@ -439,7 +429,7 @@ export default function AnalyticsPage() {
                 PDF report
               </h2>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                A branded report with the sales summary, invoices, top customers and products, trend and sync outcomes for {companyName || "your company"},
+                A management report with net invoiced value, sales trends, top customers and best-selling products for {companyName || "your company"},
                 compared with the previous period. Weeks run Monday to Sunday, Irish time.
               </p>
             </div>

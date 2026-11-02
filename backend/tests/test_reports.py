@@ -109,9 +109,9 @@ def test_report_model_totals_comparison_and_rankings(db):
     assert [p["name"] for p in model.current["top_products"]] == ["Sourdough", "Rye"]
     assert model.current["top_products"][0]["value"] == "50.00"
     items = {item.label: item for item in weekly.kpi_items(model)}
-    assert items["Invoiced value (net, draft)"].value == "€55.50"
-    assert items["Invoiced value (net, draft)"].caption == "+177.5% vs previous period"
-    assert items["Failed syncs"].value == "1"
+    assert items["Net invoiced value"].value == "€55.50"
+    assert items["Net invoiced value"].caption == "+177.5% vs previous period"
+    assert items["Active customers"].value == "2"
     assert model.warnings == []
     assert len(model.current["series"]) == 7 and model.current["filters"]["granularity"] == "day"
 
@@ -133,8 +133,8 @@ def test_missing_history_is_not_recorded_rather_than_zero(db):
     assert all(bucket["value"] is None for bucket in model.current["series"])
     assert any("No invoice values have been recorded" in warning for warning in model.warnings)
     items = {item.label: item for item in weekly.kpi_items(model)}
-    assert items["Invoiced value (net, draft)"].value == fmt.NOT_RECORDED
-    assert items["Successful syncs"].value == "1"  # activity is still reported
+    assert items["Net invoiced value"].value == fmt.NOT_RECORDED
+    assert items["Active customers"].value == "0"  # no invoiced customers in this period
     assert all(row[2] == fmt.NOT_RECORDED for row in weekly.trend_rows(model))
 
 
@@ -154,7 +154,7 @@ def test_no_percentage_change_against_a_partly_recorded_previous_period(db):
     model = weekly.build_report_model(db, "acme", resolve_period("last_week", today=WEDNESDAY), now=NOW)
     assert not model.prior_complete and model.prior["kpis"]["invoiced_value"] == "10.00"
     items = {item.label: item for item in weekly.kpi_items(model)}
-    assert items["Invoiced value (net, draft)"].caption == "Draft invoices · not paid revenue"
+    assert items["Net invoiced value"].caption == "Draft invoices · not paid revenue"
     assert rb"\(partial\)" in weekly.render_pdf(model, compress=False)  # PDF escapes parentheses
 
 
@@ -177,19 +177,19 @@ def test_pdf_is_valid_and_contains_the_required_sections(db):
     assert pdf.startswith(b"%PDF-") and pdf.rstrip().endswith(b"%%EOF")
     for expected in (
         b"Acme Bakery",
-        b"Sales & invoicing report",
+        b"Business performance report",
         b"Mon 12 Oct",
         b"Sun 18 Oct 2026",
         b"Generated 21 Oct 2026, 14:05 Irish time",
         b"Summary",
-        b"Invoice summary",
+        b"Orders and invoices",
         b"Top customers",
         b"Top products",
         b"Sales trend",
-        b"Synchronisation summary",
+        b"Best-selling products by quantity",
         b"Customer B2",
         b"Sourdough",
-        b"draft invoices",
+        b"invoices",
         b"not paid revenue",
     ):
         assert expected in pdf, expected
@@ -203,7 +203,7 @@ def test_pdf_renders_for_a_company_with_no_data_at_all(db):
     pdf = weekly.render_pdf(model, compress=False)
     assert pdf.startswith(b"%PDF-")
     assert b"No invoice values recorded for this period." in pdf
-    assert b"No synchronisation ran in this period." in pdf
+    assert b"No synchronisation ran in this period." not in pdf
 
 
 def test_long_period_and_awkward_names_render(db):
