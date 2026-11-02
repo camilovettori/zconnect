@@ -327,20 +327,39 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
 
 
 def filter_options(db: Session, company_id: str) -> Dict:
-    customers = db.execute(
-        select(models.OrderFact.customer_key, func.max(models.OrderFact.customer_name))
-        .where(models.OrderFact.company_id == company_id)
-        .group_by(models.OrderFact.customer_key)
-    ).all()
-    products = db.execute(
-        select(models.OrderLineFact.product_key, func.max(models.OrderLineFact.product_name))
-        .where(models.OrderLineFact.company_id == company_id, models.OrderLineFact.product_key != DELIVERY_PRODUCT_KEY)
-        .group_by(models.OrderLineFact.product_key)
-    ).all()
-    return {
-        "customers": sorted(({"key": key, "name": name or key} for key, name in customers), key=lambda c: c["name"].casefold()),
-        "products": sorted(({"key": key, "name": name or key} for key, name in products), key=lambda p: p["name"].casefold()),
+    customers = {
+        key: name or key
+        for key, name in db.execute(
+            select(models.OrderFact.customer_key, func.max(models.OrderFact.customer_name))
+            .where(models.OrderFact.company_id == company_id)
+            .group_by(models.OrderFact.customer_key)
+        ).all()
     }
+    for contact_id, name in db.execute(
+        select(models.HistoricalInvoice.customer_id, models.HistoricalInvoice.customer_name)
+        .where(models.HistoricalInvoice.company_id == company_id)
+    ).all():
+        key = contact_id or "name:" + " ".join(name.casefold().split())
+        customers[key] = name or key
+
+    products = {
+        key: name or key
+        for key, name in db.execute(
+            select(models.OrderLineFact.product_key, func.max(models.OrderLineFact.product_name))
+            .where(models.OrderLineFact.company_id == company_id, models.OrderLineFact.product_key != DELIVERY_PRODUCT_KEY)
+            .group_by(models.OrderLineFact.product_key)
+        ).all()
+    }
+    for key, name in db.execute(
+        select(models.HistoricalInvoiceLine.product_key, models.HistoricalInvoiceLine.product_name)
+        .where(models.HistoricalInvoiceLine.company_id == company_id, models.HistoricalInvoiceLine.product_key != DELIVERY_PRODUCT_KEY)
+    ).all():
+        products.setdefault(key, name or key)
+    return {
+        "customers": sorted(({"key": key, "name": name} for key, name in customers.items()), key=lambda c: c["name"].casefold()),
+        "products": sorted(({"key": key, "name": name} for key, name in products.items()), key=lambda p: p["name"].casefold()),
+    }
+
 
 
 def list_companies(db: Session) -> List[Dict]:
