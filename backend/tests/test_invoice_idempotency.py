@@ -654,8 +654,11 @@ def test_zoho_invoice_lookup_is_strict(monkeypatch, response, expect_error):
     else:
         assert isinstance(asyncio.run(zoho_service.find_invoices_by_reference_number("O-1")), list)
     assert seen["call"][0:2] == ("GET", "/invoices")
-    assert seen["call"][2]["reference_number"] == "O-1"
+    # The Zoho account ignores reference_number filtering; the service scans all pages
+    # and filters exact references locally instead.
+    assert "reference_number" not in seen["call"][2]
     assert seen["call"][2]["filter_by"] == "Status.All"
+    assert seen["call"][2]["page"] == 1
 
 
 # ---------------------------------------------------------------------------
