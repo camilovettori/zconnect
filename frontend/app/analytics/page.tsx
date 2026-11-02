@@ -19,6 +19,8 @@ type Summary = {
     orders_with_value: number | null;
     average_order_value: string | null;
     invoices_created: number;
+    active_customers: number;
+    units_sold: string;
     exported_orders: number | null;
     sync_runs: { success: number; partial: number; failed: number; skipped: number; running: number; total: number };
   };
@@ -366,15 +368,17 @@ export default function AnalyticsPage() {
 
         {coverage && <CoverageNotice summary={summary!} />}
 
-        <section aria-label="Sales key figures" aria-busy={loading} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <KpiCard label="Invoiced value (net, draft)" loading={loading && !summary} value={k ? money(k.invoiced_value, currency) : "–"} caption="Draft invoices · not paid revenue" />
-          <KpiCard label="Orders invoiced" loading={loading && !summary} value={k ? count(k.orders_with_value) : "–"} caption="Orders with a recorded value" />
+        <section aria-label="Sales key figures" aria-busy={loading} className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <KpiCard label="Net invoiced value" loading={loading && !summary} value={k ? money(k.invoiced_value, currency) : "–"} caption="Net of VAT · not cash received" />
+          <KpiCard label="Invoiced records" loading={loading && !summary} value={k ? count(k.orders_with_value) : "–"} caption="Captured orders and imported Zoho invoices" />
           <KpiCard
             label="Average order value"
             loading={loading && !summary}
             value={k ? (k.orders_with_value === 0 ? "–" : money(k.average_order_value, currency)) : "–"}
             caption={k?.orders_with_value === 0 ? "No invoiced orders in this range" : "Net, per invoiced order"}
           />
+          <KpiCard label="Active customers" loading={loading && !summary} value={k ? count(k.active_customers) : "–"} caption="Distinct customer IDs in selected invoiced records" />
+          <KpiCard label="Units sold" loading={loading && !summary} value={k ? Number(k.units_sold).toLocaleString("en-IE") : "–"} caption="Product units, excluding delivery charges" />
           <KpiCard
             label="Draft invoices created"
             loading={loading && !summary}
