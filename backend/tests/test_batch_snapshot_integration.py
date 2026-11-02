@@ -6,9 +6,25 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db import Base
 
 from app.services.zoho_service import ZohoService, ZohoLookupError
 from test_invoice_idempotency import StubbedExportService, make_order, details_by_id
+
+
+@pytest.fixture()
+def db(tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'batch_snapshot.db').as_posix()}", future=True)
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
 
 
 def make_batch_zoho(monkeypatch, existing=(), fail_lookup=False):
