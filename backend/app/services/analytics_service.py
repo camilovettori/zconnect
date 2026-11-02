@@ -224,6 +224,9 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
     def ranked(items: Iterable[Dict]) -> List[Dict]:
         return sorted(items, key=lambda item: (-item["value"], item["name"]))[:TOP_N]
 
+    def ranked_by_quantity(items: Iterable[Dict]) -> List[Dict]:
+        return sorted(items, key=lambda item: (-item["quantity"], -item["value"], item["name"]))[:TOP_N]
+
     return {
         "filters": {
             "company_id": f.company_id,
@@ -265,6 +268,10 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
         "top_products": [
             {"key": p["key"], "name": p["name"], "value": money(p["value"]), "quantity": str(p["quantity"].normalize()), "orders": len(p["order_ids"])}
             for p in ranked(products.values())
+        ],
+        "top_products_by_quantity": [
+            {"key": p["key"], "name": p["name"], "value": money(p["value"]), "quantity": str(p["quantity"].normalize()), "orders": len(p["order_ids"])}
+            for p in ranked_by_quantity(products.values())
         ],
     }
 
