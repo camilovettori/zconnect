@@ -24,6 +24,7 @@ from app.services.export_service import list_export_events
 
 ADMIN_ONLY = {
     ("POST", "/api/settings"),
+    ("POST", "/api/analytics/import-zoho-history"),
     ("POST", "/api/settings/unify/test"),
     ("POST", "/api/settings/zoho/test"),
     ("GET", "/api/unify/debug-samples"),
@@ -85,7 +86,7 @@ COMPANY_SCOPED = {
 
 def test_every_api_route_is_covered_by_this_suite():
     """Fails if a new route appears, so its protection level is decided deliberately."""
-    assert len(api_routes()) == 20
+    assert len(api_routes()) == 21
     assert ADMIN_ONLY <= set(api_routes())
     assert COMPANY_SCOPED <= set(api_routes()) and not (COMPANY_SCOPED & ADMIN_ONLY)
 
