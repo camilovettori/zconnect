@@ -658,7 +658,11 @@ def test_zoho_invoice_lookup_is_strict(monkeypatch, response, expect_error):
     # and filters exact references locally instead.
     assert "reference_number" not in seen["call"][2]
     assert seen["call"][2]["filter_by"] == "Status.All"
-    assert seen["call"][2]["page"] == 1
+    # The mock can report more pages forever; the lookup must stop safely.
+    if expect_error and seen["call"][2]["page"] > 1:
+        assert seen["call"][2]["page"] == 1000
+    else:
+        assert seen["call"][2]["page"] == 1
 
 
 # ---------------------------------------------------------------------------
