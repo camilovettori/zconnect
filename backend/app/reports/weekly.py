@@ -23,7 +23,7 @@ from .periods import ReportPeriod
 REPORT_TITLE = "Business performance report"
 DRAFT_NOTICE = (
     "<b>Invoiced value is not paid revenue.</b> Values are the net, pre-tax totals of the "
-    "<b>draft invoices</b> Zconnect created in Zoho Books, dated by invoice date. They do not show "
+    "invoices captured by Zconnect or imported from Zoho Books, dated by invoice date. They do not show "
     "whether an invoice was approved, sent or paid. Invoice values are not cash received."
 )
 
@@ -105,12 +105,14 @@ def _change_caption(current: Optional[str], previous: Optional[str], fallback: s
 def kpi_items(model: ReportModel) -> List[ui.Kpi]:
     k, p, cur = model.kpis, model.prior["kpis"], model.currency
     return [
-        ui.Kpi("Invoiced value (net, draft)", fmt.money(k["invoiced_value"], cur), _change_caption(k["invoiced_value"], p["invoiced_value"], "Draft invoices · not paid revenue", model.prior_complete)),
-        ui.Kpi("Orders invoiced", fmt.count(k["orders_with_value"]), _change_caption(k["orders_with_value"], p["orders_with_value"], "Orders with a recorded value", model.prior_complete)),
+        ui.Kpi("Net invoiced value", fmt.money(k["invoiced_value"], cur), _change_caption(k["invoiced_value"], p["invoiced_value"], "Draft invoices · not paid revenue", model.prior_complete)),
+        ui.Kpi("Invoiced records", fmt.count(k["orders_with_value"]), _change_caption(k["orders_with_value"], p["orders_with_value"], "Orders with a recorded value", model.prior_complete)),
         ui.Kpi("Average order value", "–", "No invoiced orders in this period")
         if k["orders_with_value"] == 0
         else ui.Kpi("Average order value", fmt.money(k["average_order_value"], cur), "Net, per invoiced order"),
         ui.Kpi("Draft invoices created", fmt.count(k["invoices_created"]), "Created by Zconnect during this period"),
+        ui.Kpi("Active customers", fmt.count(k["active_customers"]), "Distinct customer IDs"),
+        ui.Kpi("Units sold", fmt.quantity(k["units_sold"]), "Delivery charges excluded"),
     ]
 
 
@@ -146,7 +148,7 @@ def render_pdf(model: ReportModel, *, compress: bool = True) -> bytes:
         company_name=model.company_name,
         period_text=period_text,
         generated_text=fmt.generated_at(model.generated_at),
-        footer_note=f"Confidential · {model.company_name} · Amounts in {model.currency}, net of VAT · Draft invoices, not paid revenue",
+        footer_note=f"Confidential · {model.company_name} · Amounts in {model.currency}, net of VAT · Invoice values, not necessarily paid revenue",
     )
     cur, k = model.currency, model.kpis
     story: List = []
