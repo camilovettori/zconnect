@@ -32,6 +32,7 @@ type Summary = {
   series: Bucket[];
   top_customers: Ranked[];
   top_products: Ranked[];
+  top_products_by_quantity?: Ranked[];
 };
 type Option = { key: string; name: string };
 type Companies = { companies: Array<{ id: string; name: string }>; can_switch: boolean; current: string };
@@ -406,7 +407,14 @@ export default function AnalyticsPage() {
                 />
               </Panel>
             </div>
-
+            <Panel title="Best-selling products by units" subtitle="Ranked by quantity sold, with net invoiced value for context. Delivery charges excluded.">
+              <RankedBars
+                items={summary.top_products_by_quantity || []}
+                currency={currency}
+                detail={(item) => `Qty ${Number(item.quantity ?? 0).toLocaleString("en-IE")} · ${count(item.orders)} orders`}
+                empty="No product quantities recorded for this range."
+              />
+            </Panel>
           </>
         )}
 
