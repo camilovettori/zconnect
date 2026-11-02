@@ -116,6 +116,33 @@ async def fetch_snapshot(zoho: ZohoService) -> List[Dict[str, Any]]:
     return snapshot
 
 
+
+def preview_snapshot(snapshot: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Minimal monetary reconciliation metadata for an admin dry run.
+
+    Never returns customer names, invoice IDs, or individual invoice details.
+    Statuses stay separate so draft invoices are never described as paid sales.
+    """
+    counts: Dict[str, int] = {}
+    net_by_currency: Dict[str, Decimal] = {}
+    earliest = latest = None
+    for invoice in snapshot:
+        status = invoice["status"]
+        currency = invoice["currency"]
+        counts[status] = counts.get(status, 0) + 1
+        net_by_currency[currency] = net_by_currency.get(currency, Decimal("0")) + invoice["net_amount"]
+        day = invoice["invoice_date"]
+        earliest = day if earliest is None else min(earliest, day)
+        latest = day if latest is None else max(latest, day)
+    return {
+        "validated_invoices": len(snapshot),
+        "status_counts": dict(sorted(counts.items())),
+        "net_by_currency": {c: str(v.quantize(Decimal("0.01"))) for c, v in sorted(net_by_currency.items())},
+        "first_invoice_date": earliest.isoformat() if earliest else None,
+        "last_invoice_date": latest.isoformat() if latest else None,
+    }
+
+
 def persist_snapshot(db: Session, *, company_id: str, zoho_org_id: str, snapshot: List[Dict[str, Any]]) -> Dict[str, int]:
     """Idempotent import. Caller must ensure this company owns the Zoho organisation."""
     if not company_id or not zoho_org_id:
