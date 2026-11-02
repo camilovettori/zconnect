@@ -42,6 +42,16 @@ type FieldConfig = {
 
 type ToastKind = "success" | "neutral" | "error";
 
+type ZohoHistoryPreview = {
+  dry_run: true;
+  saved: false;
+  validated_invoices: number;
+  status_counts: Record<string, number>;
+  net_by_currency: Record<string, string>;
+  first_invoice_date: string | null;
+  last_invoice_date: string | null;
+};
+
 const SECRET_FIELDS = new Set<FieldKey>([
   "UNIFY_CLIENT_ID",
   "UNIFY_CLIENT_SECRET",
@@ -230,6 +240,9 @@ export function ConnectionsPanel() {
   const [messageKind, setMessageKind] = useState<ToastKind>("success");
   const [isSaving, setIsSaving] = useState(false);
   const [testing, setTesting] = useState<"unify" | "zoho" | null>(null);
+  const [historyPreview, setHistoryPreview] = useState<ZohoHistoryPreview | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
   const messageTimer = useRef<number | null>(null);
 
   const storedCount = useMemo(
@@ -433,6 +446,35 @@ export function ConnectionsPanel() {
     }
   };
 
+  const previewZohoHistory = async () => {
+    if (!isAdmin || historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryPreview(null);
+    setHistoryError("");
+    try {
+      const response = await fetch("/api/analytics/import-zoho-history?dry_run=true", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = typeof payload?.detail === "string" ? payload.detail : `HTTP ${response.status}`;
+        throw new Error(detail);
+      }
+      if (payload?.dry_run !== true || payload?.saved !== false ||
+          !Number.isInteger(payload?.validated_invoices) ||
+          !payload?.status_counts || !payload?.net_by_currency) {
+        throw new Error("Unexpected response from historical preview");
+      }
+      setHistoryPreview(payload as ZohoHistoryPreview);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Unable to preview Zoho history");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   const noticeKind = messageKind === "neutral" ? "info" : messageKind;
   const secretTotal = Object.keys(EMPTY_FLAGS).length;
   const statusLine = !isAdmin
@@ -565,6 +607,48 @@ export function ConnectionsPanel() {
           );
         })}
       </div>
+
+      {isAdmin && (
+        <section className={`${CARD} space-y-4 p-5 sm:p-6`} aria-labelledby="zoho-history-heading">
+          <div>
+            <h2 id="zoho-history-heading" className="text-base font-semibold text-slate-950">Zoho historical invoices</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Read-only validation of historical invoices. This preview does not save records or create Zoho invoices.
+              Historical import remains disabled on the backend until separately enabled and validated.
+            </p>
+          </div>
+          <button type="button" className={BUTTON_SECONDARY} disabled={historyLoading || !settingsLoaded}
+            onClick={previewZohoHistory}>
+            {historyLoading ? "Checking Zoho history…" : "Preview historical invoices (dry run)"}
+          </button>
+          {historyError && <Notice kind="error">{historyError}</Notice>}
+          {historyPreview && (
+            <div className="space-y-3 text-sm text-slate-700" aria-live="polite">
+              <p className="font-semibold">{historyPreview.validated_invoices} validated invoices — nothing saved</p>
+              <p>Invoice dates: {historyPreview.first_invoice_date ?? "—"} to {historyPreview.last_invoice_date ?? "—"}</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <h3 className="font-medium">Invoices by status</h3>
+                  <ul className="mt-2 space-y-1">
+                    {Object.entries(historyPreview.status_counts).map(([status, count]) => (
+                      <li key={status}>{status}: {count}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h3 className="font-medium">Net invoiced value by currency (not cash received)</h3>
+                  <ul className="mt-2 space-y-1">
+                    {Object.entries(historyPreview.net_by_currency).map(([currency, amount]) => (
+                      <li key={currency}>{currency}: {amount}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500">Includes invoice statuses separately; values may include drafts or unpaid invoices. Review before any import.</p>
+            </div>
+          )}
+        </section>
+      )}
 
       <div className={`${CARD} flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5`}>
         <p className="text-sm text-slate-600" aria-live="polite">
