@@ -128,6 +128,6 @@ def test_historical_invoice_date_change_never_double_counts(db):
         )
     old_date = summary(date(2026, 10, 9), date(2026, 10, 9))
     new_date = summary(date(2026, 10, 10), date(2026, 10, 10))
-    assert old_date["kpis"]["invoiced_value"] == "0.00"
+    assert old_date["kpis"]["invoiced_value"] is None
     assert new_date["kpis"]["invoiced_value"] == "20.00"
     assert new_date["top_customers"][0]["name"] == "Cafe A"
