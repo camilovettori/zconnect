@@ -219,4 +219,57 @@ class OrderLineFact(Base):
     )
 
 
-ANALYTICS_TABLES = ("zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines")
+
+class HistoricalInvoice(Base):
+    """Read-only snapshot of a Zoho Books invoice for business reporting.
+
+    Unique per company and Zoho organisation. Kept separate from Zconnect order
+    facts because one invoice can cover multiple Unify orders.
+    """
+
+    __tablename__ = "zconnect_historical_invoices"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    company_id = Column(String(64), ForeignKey("zconnect_companies.id", ondelete="RESTRICT"), nullable=False)
+    zoho_org_id = Column(String(128), nullable=False)
+    zoho_invoice_id = Column(String(128), nullable=False)
+    invoice_number = Column(String(128), nullable=True)
+    invoice_date = Column(Date, nullable=False)
+    customer_id = Column(String(128), nullable=True)
+    customer_name = Column(String(255), nullable=False)
+    status = Column(String(32), nullable=False)
+    currency = Column(String(3), nullable=False)
+    net_amount = Column(Numeric(14, 2), nullable=False)
+    captured_at = Column(DateTime(timezone=True), nullable=False, default=_utc_now, server_default=func.now())
+
+    lines = relationship("HistoricalInvoiceLine", back_populates="invoice", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "zoho_org_id", "zoho_invoice_id", name="uq_zconnect_hist_invoice"),
+        UniqueConstraint("id", "company_id", name="uq_zconnect_hist_invoice_company"),
+        Index("ix_zconnect_hist_invoice_date", "company_id", "invoice_date"),
+        Index("ix_zconnect_hist_invoice_customer", "company_id", "customer_id"),
+    )
+
+
+class HistoricalInvoiceLine(Base):
+    __tablename__ = "zconnect_historical_invoice_lines"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    invoice_id = Column(BigInteger().with_variant(Integer, "sqlite"), nullable=False)
+    company_id = Column(String(64), nullable=False)
+    zoho_line_item_id = Column(String(128), nullable=True)
+    product_key = Column(String(255), nullable=False)
+    product_name = Column(String(255), nullable=False)
+    quantity = Column(Numeric(14, 3), nullable=False)
+    net_amount = Column(Numeric(14, 2), nullable=False)
+
+    invoice = relationship("HistoricalInvoice", back_populates="lines")
+
+    __table_args__ = (
+        ForeignKeyConstraint(["invoice_id", "company_id"], ["zconnect_historical_invoices.id", "zconnect_historical_invoices.company_id"], ondelete="CASCADE", name="fk_zconnect_hist_line_company"),
+        Index("ix_zconnect_hist_line_product", "company_id", "product_key"),
+    )
+
+
+ANALYTICS_TABLES = ("zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines", "zconnect_historical_invoices", "zconnect_historical_invoice_lines")
