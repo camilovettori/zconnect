@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict, Iterable, List, Optional
+from types import SimpleNamespace
 
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -114,16 +115,37 @@ def _range_bounds(f: AnalyticsFilters):
 
 
 def _value_rows(db: Session, f: AnalyticsFilters):
-    """Captured orders in range with the value that counts under the filters."""
-    query = (
+    """Captured Unify orders plus historical invoices, counted only once per Zoho ID.
+
+    The Zoho invoice snapshot takes precedence if the same invoice appears in
+    both stores. Historical invoice counts represent invoices, not individual
+    Unify order IDs, since multiple orders may share a single Zoho invoice.
+    """
+    historical = db.execute(
+        select(models.HistoricalInvoice)
+        .options(selectinload(models.HistoricalInvoice.lines))
+        .where(
+            models.HistoricalInvoice.company_id == f.company_id,
+            models.HistoricalInvoice.invoice_date >= f.date_from,
+            models.HistoricalInvoice.invoice_date <= f.date_to,
+        )
+    ).scalars().all()
+    history_ids = {invoice.zoho_invoice_id for invoice in historical}
+    rows = []
+    original_query = (
         select(models.OrderFact)
         .options(selectinload(models.OrderFact.lines))
-        .where(models.OrderFact.company_id == f.company_id, models.OrderFact.invoice_date >= f.date_from, models.OrderFact.invoice_date <= f.date_to)
+        .where(
+            models.OrderFact.company_id == f.company_id,
+            models.OrderFact.invoice_date >= f.date_from,
+            models.OrderFact.invoice_date <= f.date_to,
+        )
     )
-    if f.customer:
-        query = query.where(models.OrderFact.customer_key == f.customer)
-    rows = []
-    for fact in db.execute(query).scalars().all():
+    for fact in db.execute(original_query).scalars().all():
+        if fact.zoho_invoice_id and fact.zoho_invoice_id in history_ids:
+            continue
+        if f.customer and f.customer != fact.customer_key:
+            continue
         lines = [line for line in fact.lines if line.company_id == f.company_id]
         if f.product:
             lines = [line for line in lines if line.product_key == f.product]
@@ -133,7 +155,32 @@ def _value_rows(db: Session, f: AnalyticsFilters):
         else:
             value = Decimal(fact.net_amount)
         rows.append((fact, lines, value))
+
+    for invoice in historical:
+        if invoice.status.lower() in ("void", "cancelled", "canceled"):
+            continue
+        customer_key = invoice.customer_id or "name:" + " ".join(invoice.customer_name.casefold().split())
+        if f.customer and f.customer != customer_key:
+            continue
+        lines = [line for line in invoice.lines if line.company_id == f.company_id]
+        if f.product:
+            lines = [line for line in lines if line.product_key == f.product]
+            if not lines:
+                continue
+            value = sum((Decimal(line.net_amount) for line in lines), Decimal("0"))
+        else:
+            value = Decimal(invoice.net_amount)
+        fact = SimpleNamespace(
+            id="history:" + str(invoice.id),
+            invoice_date=invoice.invoice_date,
+            currency=invoice.currency,
+            zoho_invoice_id=invoice.zoho_invoice_id,
+            customer_key=customer_key,
+            customer_name=invoice.customer_name,
+        )
+        rows.append((fact, lines, value))
     return rows
+
 
 
 def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
@@ -144,6 +191,9 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
 
     capture_start_at = db.execute(select(func.min(models.OrderFact.captured_at)).where(models.OrderFact.company_id == f.company_id)).scalar()
     capture_start = capture_start_at.date() if isinstance(capture_start_at, datetime) else capture_start_at
+    history_start = db.execute(select(func.min(models.HistoricalInvoice.invoice_date)).where(models.HistoricalInvoice.company_id == f.company_id)).scalar()
+    if history_start is not None:
+        capture_start = min(capture_start, history_start) if capture_start is not None else history_start
     # A value is known when capture had started by the end of the range (or values exist in it),
     # and all captured values share one currency.
     value_known = len(currencies) <= 1 and (bool(rows) or (capture_start is not None and capture_start <= f.date_to))
@@ -237,7 +287,7 @@ def compute_summary(db: Session, f: AnalyticsFilters) -> Dict:
             "product": f.product,
         },
         "currency": currencies[0] if len(currencies) == 1 else (None if not currencies else "MIXED"),
-        "value_basis": "Net (pre-tax) value of draft invoices created by Zconnect, by invoice date. Not paid revenue.",
+        "value_basis": "Net pre-tax invoice value from Zconnect captures and historical Zoho Books imports. Not cash received.",
         "kpis": {
             # None = unknown (nothing captured for this range yet, or mixed currencies); never 0.
             "invoiced_value": None if not value_known else money(total_value),
