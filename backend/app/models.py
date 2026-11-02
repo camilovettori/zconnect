@@ -272,4 +272,5 @@ class HistoricalInvoiceLine(Base):
     )
 
 
-ANALYTICS_TABLES = ("zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines", "zconnect_historical_invoices", "zconnect_historical_invoice_lines")
+ANALYTICS_TABLES = ("zconnect_companies", "zconnect_sync_run_companies", "zconnect_order_facts", "zconnect_order_lines")
+ZOHO_HISTORY_TABLES = ("zconnect_historical_invoices", "zconnect_historical_invoice_lines")
