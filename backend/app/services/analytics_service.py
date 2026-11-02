@@ -130,7 +130,11 @@ def _value_rows(db: Session, f: AnalyticsFilters):
             models.HistoricalInvoice.invoice_date <= f.date_to,
         )
     ).scalars().all()
-    history_ids = {invoice.zoho_invoice_id for invoice in historical}
+    # Deduplicate across dates, including when a Zoho invoice date changes.
+    history_ids = set(db.execute(
+        select(models.HistoricalInvoice.zoho_invoice_id)
+        .where(models.HistoricalInvoice.company_id == f.company_id)
+    ).scalars().all())
     rows = []
     original_query = (
         select(models.OrderFact)
