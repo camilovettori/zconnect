@@ -71,6 +71,12 @@ def _normalise_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
     # which may include VAT and adjustments. Missing subtotal => fail closed.
     if invoice.get("sub_total") is None:
         raise HistoricalImportError(f"Invoice {invoice_id} missing pre-tax sub_total")
+    subtotal = _decimal(invoice.get("sub_total"), "sub_total")
+    product_total = sum((line["net_amount"] for line in lines), Decimal("0"))
+    if abs(subtotal - product_total) > Decimal("0.01"):
+        raise HistoricalImportError(
+            f"Invoice {invoice_id} subtotal differs from line totals; verify discounts or adjustments"
+        )
     return {
         "zoho_invoice_id": invoice_id,
         "invoice_number": str(invoice.get("invoice_number") or "")[:128] or None,
@@ -79,7 +85,7 @@ def _normalise_invoice(invoice: Dict[str, Any]) -> Dict[str, Any]:
         "customer_name": _required(invoice.get("customer_name"), "customer_name")[:255],
         "status": _required(invoice.get("status"), "status").lower()[:32],
         "currency": _required(invoice.get("currency_code"), "currency_code")[:3],
-        "net_amount": _decimal(invoice.get("sub_total"), "sub_total"),
+        "net_amount": subtotal,
         "lines": lines,
     }
 
