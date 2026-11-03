@@ -151,3 +151,65 @@ def test_dry_run_preview_summarises_without_customer_data():
     }
     assert "Cafe A" not in str(preview)
     assert "inv1" not in str(preview)
+
+class FakeResponse:
+    status_code = 200
+    def __init__(self, record):
+        self.record = record
+    def json(self):
+        return {"invoice": self.record}
+
+
+class FakeZoho:
+    org_id = "org-1"
+    def __init__(self, records):
+        self.records = records
+        self.detail_calls = []
+    async def list_all_invoices_for_duplicate_check(self):
+        return [{"invoice_id": x["invoice_id"], "date": x["date"]} for x in self.records]
+    async def _request(self, method, path):
+        assert method == "GET"
+        invoice_id = path.rsplit("/", 1)[-1]
+        self.detail_calls.append(invoice_id)
+        return FakeResponse(next(x for x in self.records if x["invoice_id"] == invoice_id))
+
+
+@pytest.mark.asyncio
+async def test_incremental_batch_resumes_without_duplicate_detail_calls(db):
+    from app.services.zoho_history_service import import_next_batch
+    records = []
+    for i, day in enumerate(["2026-10-12", "2026-10-12", "2026-10-11"]):
+        row = invoice(invoice_id=str(i))
+        row["date"] = day
+        records.append(row)
+    zoho = FakeZoho(records)
+    first = await import_next_batch(zoho, db, company_id="default", max_details=2)
+    assert first["imported"] == 2
+    assert first["remaining_estimate"] == 1
+    second = await import_next_batch(zoho, db, company_id="default", max_details=2)
+    assert second["imported"] == 1
+    assert zoho.detail_calls == ["0", "1", "2"]
+    assert len(db.scalars(select(models.HistoricalInvoice)).all()) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_does_not_split_an_invoice_date(db):
+    from app.services.zoho_history_service import import_next_batch
+    records = []
+    for i in range(3):
+        row = invoice(invoice_id=str(i))
+        records.append(row)
+    zoho = FakeZoho(records)
+    result = await import_next_batch(zoho, db, company_id="default", max_details=2)
+    assert result["imported"] == 0
+    assert result["blocked_large_day"] is True
+    assert zoho.detail_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cheap_preview_never_requests_invoice_details(db):
+    from app.services.zoho_history_service import preview_next_batch
+    zoho = FakeZoho([invoice(invoice_id="1"), invoice(invoice_id="2")])
+    result = await preview_next_batch(zoho, db, company_id="default")
+    assert result["remaining_estimate"] == 2
+    assert zoho.detail_calls == []

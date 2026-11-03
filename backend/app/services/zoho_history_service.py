@@ -186,3 +186,87 @@ def persist_snapshot(db: Session, *, company_id: str, zoho_org_id: str, snapshot
         db.rollback()
         raise
     return {"created": created, "updated": updated, "total": len(snapshot)}
+
+async def import_next_batch(zoho: ZohoService, db: Session, *, company_id: str, max_details: int = 100) -> Dict[str, Any]:
+    """Import one complete invoice-date group at a time, newest first.
+
+    Existing invoice IDs are skipped without detail calls. A date group is
+    committed only after every detail for that date has been validated.
+    A group larger than the remaining budget is deferred in full.
+    """
+    if not 1 <= max_details <= 100:
+        raise HistoricalImportError("Batch limit must be between 1 and 100")
+    summaries = await zoho.list_all_invoices_for_duplicate_check()
+    ids = [_required(row.get("invoice_id"), "invoice_id") for row in summaries]
+    if len(ids) != len(set(ids)):
+        raise HistoricalImportError("Zoho returned duplicate invoice IDs")
+    if len(ids) > 10000:
+        raise HistoricalImportError("More than 10,000 invoices; manual review required")
+    existing = set(db.execute(
+        select(models.HistoricalInvoice.zoho_invoice_id).where(
+            models.HistoricalInvoice.company_id == company_id,
+            models.HistoricalInvoice.zoho_org_id == zoho.org_id,
+        )
+    ).scalars().all())
+    pending = {}
+    for row in summaries:
+        invoice_id = _required(row.get("invoice_id"), "invoice_id")
+        if invoice_id in existing:
+            continue
+        try:
+            day = date.fromisoformat(_required(row.get("date"), "date"))
+        except ValueError as exc:
+            raise HistoricalImportError("Invalid invoice date in Zoho listing") from exc
+        pending.setdefault(day, []).append(invoice_id)
+    total_pending = sum(map(len, pending.values()))
+    imported = 0
+    dates_completed = 0
+    for day in sorted(pending, reverse=True):
+        group = pending[day]
+        if imported + len(group) > max_details:
+            break
+        snapshot = []
+        for invoice_id in group:
+            try:
+                response = await zoho._request("GET", f"/invoices/{invoice_id}")
+            except Exception as exc:
+                raise ZohoLookupError(f"Unable to fetch Zoho invoice detail for {invoice_id}") from exc
+            if response.status_code != 200:
+                raise ZohoLookupError(f"Zoho invoice detail failed with HTTP {response.status_code}")
+            try:
+                detail = response.json().get("invoice")
+            except (ValueError, AttributeError) as exc:
+                raise ZohoLookupError("Invalid Zoho invoice detail JSON") from exc
+            if not isinstance(detail, dict) or str(detail.get("invoice_id")) != invoice_id:
+                raise ZohoLookupError("Zoho invoice ID mismatch")
+            normalised = _normalise_invoice(detail)
+            if normalised["invoice_date"] != day:
+                raise HistoricalImportError("Invoice date changed during import; retry after reconciliation")
+            snapshot.append(normalised)
+        persist_snapshot(db, company_id=company_id, zoho_org_id=zoho.org_id, snapshot=snapshot)
+        imported += len(group)
+        dates_completed += 1
+    return {
+        "imported": imported, "remaining_estimate": total_pending - imported,
+        "completed_dates": dates_completed, "listing_count": len(summaries),
+        "blocked_large_day": bool(pending) and imported == 0,
+    }
+
+
+async def preview_next_batch(zoho: ZohoService, db: Session, *, company_id: str) -> Dict[str, Any]:
+    """Cheap preview: listing pages only, no individual invoice detail requests."""
+    summaries = await zoho.list_all_invoices_for_duplicate_check()
+    existing = set(db.execute(
+        select(models.HistoricalInvoice.zoho_invoice_id).where(
+            models.HistoricalInvoice.company_id == company_id,
+            models.HistoricalInvoice.zoho_org_id == zoho.org_id,
+        )
+    ).scalars().all())
+    ids = [_required(row.get("invoice_id"), "invoice_id") for row in summaries]
+    if len(ids) != len(set(ids)):
+        raise HistoricalImportError("Duplicate invoice IDs in listing")
+    pending = len([invoice_id for invoice_id in ids if invoice_id not in existing])
+    return {"dry_run": True, "saved": False, "listed_invoices": len(ids),
+            "already_imported": len(ids) - pending, "remaining_estimate": pending,
+            "estimated_minimum_days_at_100": (pending + 99) // 100,
+            "note": "Invoice totals require detail requests; not available in cheap preview"}
