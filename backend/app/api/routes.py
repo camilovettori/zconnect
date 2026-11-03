@@ -31,7 +31,7 @@ from ..services.unify_service import UnifyService, make_unify_service, UnifyServ
 from ..services import analytics_service, csv_parser, zoho_history_service
 from ..reports import weekly as weekly_report
 from ..reports.periods import ReportPeriodError, resolve_period
-from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError
+from ..services.zoho_service import ZohoService, make_zoho_service, ZohoServiceError, ZohoLookupError
 from ..services.export_service import (
     AuditContext,
     EXPORT_STATUS_RESET,
