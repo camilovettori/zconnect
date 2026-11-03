@@ -869,14 +869,13 @@ async def import_zoho_history(
         raise HTTPException(status_code=403, detail="History import is limited to the configured Zoho organisation's company")
     zoho = make_zoho_service()
     try:
-        snapshot = await zoho_history_service.fetch_snapshot(zoho)
         if dry_run:
-            return {"dry_run": True, "saved": False, **zoho_history_service.preview_snapshot(snapshot)}
-        result = zoho_history_service.persist_snapshot(
-            db, company_id=models.DEFAULT_COMPANY_ID, zoho_org_id=zoho.org_id, snapshot=snapshot
+            return await zoho_history_service.preview_next_batch(
+                zoho, db, company_id=models.DEFAULT_COMPANY_ID
+            )
+        return await zoho_history_service.import_next_batch(
+            zoho, db, company_id=models.DEFAULT_COMPANY_ID, max_details=100
         )
-        logger.info("Zoho history imported %s invoices for default company by %s", result["total"], identity.user_id)
-        return {"dry_run": False, "saved": True, **result}
     except (zoho_history_service.HistoricalImportError, ZohoLookupError, ZohoServiceError) as exc:
         db.rollback()
         logger.warning("Zoho history validation failed: %s", exc.__class__.__name__)
