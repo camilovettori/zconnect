@@ -183,3 +183,19 @@ async def test_zoho_long_item_name_skips_invalid_api_lookup(monkeypatch):
         raise AssertionError("Zoho API must not be called for oversized item names")
     monkeypatch.setattr(zoho, "_request", forbidden)
     assert await zoho.find_item_by_name("a" * 101) is None
+
+
+@pytest.mark.asyncio
+async def test_zoho_item_permission_denial_circuit_breaker(monkeypatch):
+    import httpx
+    from app.services import zoho_service as module
+    zoho = module.ZohoService("https://www.zohoapis.eu", "id", "secret", "refresh", "scope-denied-org")
+    calls = []
+    async def denied(*args, **kwargs):
+        calls.append(1)
+        return httpx.Response(401, json={"code": 57, "message": "Not authorized"})
+    monkeypatch.setattr(zoho, "_request", denied)
+    assert await zoho.find_item_by_name("Brownie") is None
+    assert await zoho.find_item_by_name("Cookie") is None
+    assert len(calls) == 1
+    module._ITEM_PERMISSION_DENIED_UNTIL.pop(zoho._cache_key(), None)
