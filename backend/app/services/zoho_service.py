@@ -46,6 +46,8 @@ class _TokenCacheEntry:
 
 _TOKEN_CACHE: Dict[str, _TokenCacheEntry] = {}
 _TOKEN_LOCKS: Dict[str, asyncio.Lock] = {}
+_REFRESH_COOLDOWN_UNTIL: Dict[str, float] = {}
+_REFRESH_COOLDOWN_SECONDS = 300
 
 
 class ZohoService:
@@ -100,6 +102,9 @@ class ZohoService:
             resp = await client.post(ZOHO_TOKEN_URL, data=payload)
 
         if resp.status_code not in (200, 201):
+            if resp.status_code == 429 or "too many requests" in resp.text.lower():
+                _REFRESH_COOLDOWN_UNTIL[self._cache_key()] = time.monotonic() + _REFRESH_COOLDOWN_SECONDS
+                raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
             raise ZohoServiceError(f"Zoho token refresh failed {resp.status_code}: {resp.text}")
 
         data = resp.json()
@@ -113,6 +118,7 @@ class ZohoService:
         except (TypeError, ValueError):
             expires_in_seconds = 3600
 
+        _REFRESH_COOLDOWN_UNTIL.pop(self._cache_key(), None)
         _TOKEN_CACHE[self._cache_key()] = _TokenCacheEntry(
             access_token=access_token,
             expires_at=time.time() + max(0, expires_in_seconds - TOKEN_REFRESH_BUFFER_SECONDS),
@@ -124,7 +130,11 @@ class ZohoService:
         if cached:
             return cached
 
+        if time.monotonic() < _REFRESH_COOLDOWN_UNTIL.get(self._cache_key(), 0):
+            raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
         async with self._lock():
+            if time.monotonic() < _REFRESH_COOLDOWN_UNTIL.get(self._cache_key(), 0):
+                raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
             if not force_refresh:
                 cached = self._cached_token()
                 if cached:
@@ -158,6 +168,14 @@ class ZohoService:
             resp = await client.request(method, url, headers=headers, params=params, json=json)
 
         if resp.status_code == 401 and not force_refresh:
+            # An authorization/scope denial (Zoho code 57) is not an expired token.
+            # Refreshing for each product would exhaust the OAuth endpoint.
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict) and body.get("code") == 57:
+                return resp
             headers = await self._headers(force_refresh=True)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.request(method, url, headers=headers, params=params, json=json)
@@ -287,6 +305,10 @@ class ZohoService:
     async def find_item_by_name(self, name: str) -> Optional[str]:
         search_name = (name or "").strip()
         if not search_name:
+            return None
+
+        if len(search_name) > 100:
+            # Zoho rejects item-name lookups above its 100-character limit.
             return None
 
         resp = await self._request(
