@@ -151,3 +151,51 @@ def test_dry_run_preview_summarises_without_customer_data():
     }
     assert "Cafe A" not in str(preview)
     assert "inv1" not in str(preview)
+
+
+@pytest.mark.asyncio
+async def test_zoho_scope_denial_does_not_trigger_token_refresh(monkeypatch):
+    import httpx
+    from app.services.zoho_service import ZohoService
+    zoho = ZohoService("https://www.zohoapis.eu", "id", "secret", "refresh", "org")
+    calls = []
+    async def fake_headers(force_refresh=False):
+        calls.append(force_refresh)
+        return {"Authorization": "Zoho-oauthtoken fake"}
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def request(self, method, url, **kwargs):
+            return httpx.Response(401, json={"code": 57, "message": "Not authorized"})
+    monkeypatch.setattr(zoho, "_headers", fake_headers)
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    response = await zoho._request("GET", "/items")
+    assert response.status_code == 401
+    assert calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_zoho_long_item_name_skips_invalid_api_lookup(monkeypatch):
+    from app.services.zoho_service import ZohoService
+    zoho = ZohoService("https://www.zohoapis.eu", "id", "secret", "refresh", "org")
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Zoho API must not be called for oversized item names")
+    monkeypatch.setattr(zoho, "_request", forbidden)
+    assert await zoho.find_item_by_name("a" * 101) is None
+
+
+@pytest.mark.asyncio
+async def test_zoho_item_permission_denial_circuit_breaker(monkeypatch):
+    import httpx
+    from app.services import zoho_service as module
+    zoho = module.ZohoService("https://www.zohoapis.eu", "id", "secret", "refresh", "scope-denied-org")
+    calls = []
+    async def denied(*args, **kwargs):
+        calls.append(1)
+        return httpx.Response(401, json={"code": 57, "message": "Not authorized"})
+    monkeypatch.setattr(zoho, "_request", denied)
+    assert await zoho.find_item_by_name("Brownie") is None
+    assert await zoho.find_item_by_name("Cookie") is None
+    assert len(calls) == 1
+    module._ITEM_PERMISSION_DENIED_UNTIL.pop(zoho._cache_key(), None)

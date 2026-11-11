@@ -46,6 +46,10 @@ class _TokenCacheEntry:
 
 _TOKEN_CACHE: Dict[str, _TokenCacheEntry] = {}
 _TOKEN_LOCKS: Dict[str, asyncio.Lock] = {}
+_REFRESH_COOLDOWN_UNTIL: Dict[str, float] = {}
+_REFRESH_COOLDOWN_SECONDS = 300
+_ITEM_PERMISSION_DENIED_UNTIL: Dict[str, float] = {}
+_ITEM_PERMISSION_DENIED_SECONDS = 300
 
 
 class ZohoService:
@@ -100,6 +104,9 @@ class ZohoService:
             resp = await client.post(ZOHO_TOKEN_URL, data=payload)
 
         if resp.status_code not in (200, 201):
+            if resp.status_code == 429 or "too many requests" in resp.text.lower():
+                _REFRESH_COOLDOWN_UNTIL[self._cache_key()] = time.monotonic() + _REFRESH_COOLDOWN_SECONDS
+                raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
             raise ZohoServiceError(f"Zoho token refresh failed {resp.status_code}: {resp.text}")
 
         data = resp.json()
@@ -113,6 +120,7 @@ class ZohoService:
         except (TypeError, ValueError):
             expires_in_seconds = 3600
 
+        _REFRESH_COOLDOWN_UNTIL.pop(self._cache_key(), None)
         _TOKEN_CACHE[self._cache_key()] = _TokenCacheEntry(
             access_token=access_token,
             expires_at=time.time() + max(0, expires_in_seconds - TOKEN_REFRESH_BUFFER_SECONDS),
@@ -124,7 +132,11 @@ class ZohoService:
         if cached:
             return cached
 
+        if time.monotonic() < _REFRESH_COOLDOWN_UNTIL.get(self._cache_key(), 0):
+            raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
         async with self._lock():
+            if time.monotonic() < _REFRESH_COOLDOWN_UNTIL.get(self._cache_key(), 0):
+                raise ZohoServiceError("Zoho authentication temporarily rate-limited; retry later")
             if not force_refresh:
                 cached = self._cached_token()
                 if cached:
@@ -158,6 +170,14 @@ class ZohoService:
             resp = await client.request(method, url, headers=headers, params=params, json=json)
 
         if resp.status_code == 401 and not force_refresh:
+            # An authorization/scope denial (Zoho code 57) is not an expired token.
+            # Refreshing for each product would exhaust the OAuth endpoint.
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict) and body.get("code") == 57:
+                return resp
             headers = await self._headers(force_refresh=True)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.request(method, url, headers=headers, params=params, json=json)
@@ -289,6 +309,14 @@ class ZohoService:
         if not search_name:
             return None
 
+        if len(search_name) > 100:
+            # Zoho rejects item-name lookups above its 100-character limit.
+            return None
+        if time.monotonic() < _ITEM_PERMISSION_DENIED_UNTIL.get(self._cache_key(), 0):
+            # A denied Items scope affects all items, not just the first product.
+            # Preserve the existing direct-line-item fallback without repeated 401 calls.
+            return None
+
         resp = await self._request(
             "GET",
             ZOHO_ITEMS_PATH,
@@ -298,6 +326,15 @@ class ZohoService:
                 "per_page": 200,
             },
         )
+        if resp.status_code == 401:
+            try:
+                error_body = resp.json()
+            except ValueError:
+                error_body = {}
+            if isinstance(error_body, dict) and error_body.get("code") == 57:
+                _ITEM_PERMISSION_DENIED_UNTIL[self._cache_key()] = time.monotonic() + _ITEM_PERMISSION_DENIED_SECONDS
+                logger.warning("Zoho Items scope denied; bypassing item lookups temporarily")
+                return None
         if resp.status_code != 200:
             raise ZohoServiceError(f"Zoho item lookup failed {resp.status_code}: {resp.text}")
 
